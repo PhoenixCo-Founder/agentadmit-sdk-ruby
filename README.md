@@ -62,6 +62,54 @@ The token goes to the human, not the agent. No automated delivery = no prompt in
 
 **In-app AI scopes.** If your app has built-in AI features (analysis, plan generation, photo recognition), do not expose those as agent scopes. The user's AI agent can read the raw data and do the analysis itself. Exposing in-app AI endpoints to agents creates double cost.
 
+## Rate Limiting
+
+The AgentAdmit introspection endpoint enforces rate limits. The Ruby SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter — no changes needed in your middleware code.
+
+### Retry behavior
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Initial delay | 1 second | First retry wait |
+| Backoff multiplier | 2× | Doubles each retry |
+| Cap | 30 seconds | Maximum wait per retry |
+| Jitter | 0–500 ms | Random addition to each delay |
+| Max retries | **3** | Configurable |
+
+The SDK also respects the `Retry-After` response header — if present, it overrides the computed backoff delay.
+
+### Configuring max retries
+
+```ruby
+AgentAdmit.configure do |config|
+  config.max_retries = 5  # default: 3
+end
+```
+
+Or via environment variable:
+
+```env
+AGENTADMIT_MAX_RETRIES=5
+```
+
+### Handling exhausted retries
+
+When all retries are exhausted, `IntrospectionClient#verify` raises `AgentAdmit::RateLimitError`:
+
+```ruby
+begin
+  result = client.verify(token)
+rescue AgentAdmit::RateLimitError => e
+  render json: { error: 'rate_limited', retry_after: e.retry_after }, status: 429
+end
+```
+
+`RateLimitError` attributes:
+- `retry_after` — seconds from `Retry-After` header (`nil` if absent)
+- `limit` — `X-RateLimit-Limit` header value (`nil` if absent)
+- `remaining` — `X-RateLimit-Remaining` header value (`nil` if absent)
+- `reset` — `X-RateLimit-Reset` Unix timestamp (`nil` if absent)
+
 ## Documentation
 
 Full integration guide: https://docs.agentadmit.com/getting-started

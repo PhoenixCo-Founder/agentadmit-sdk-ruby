@@ -8,7 +8,8 @@
 module AgentAdmit
   class Config
     attr_accessor :app_id, :api_key, :verify_url, :api_url,
-                  :token_prefix_access, :token_prefix_connection
+                  :token_prefix_access, :token_prefix_connection,
+                  :max_retries
 
     def initialize
       @app_id = ENV.fetch("AGENTADMIT_APP_ID", "")
@@ -17,6 +18,8 @@ module AgentAdmit
       @api_url = ENV.fetch("AGENTADMIT_API_URL", "https://api.agentadmit.com")
       @token_prefix_access = "ag_at_"
       @token_prefix_connection = "ag_ct_"
+      # Max retries on HTTP 429 before raising RateLimitError. Default: 3.
+      @max_retries = ENV.fetch("AGENTADMIT_MAX_RETRIES", "3").to_i
     end
   end
 end
