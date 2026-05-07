@@ -18,15 +18,14 @@ Add your credentials to `config/credentials.yml.enc` or `.env`:
 
 ```env
 AGENTADMIT_APP_ID=app_yourappid
-AGENTADMIT_API_KEY=ak_test_yourkey
-AGENTADMIT_SECRET=sk_test_yoursecret
+AGENTADMIT_API_KEY=aa_test_yourkey
 ```
 
 Add scope enforcement to any controller:
 
 ```ruby
 class OrdersController < ApplicationController
-  before_action -> { agentadmit_require_scope!('read:orders') }
+  before_action -> { require_scope_if_agent!('read:orders') }
 
   def index
     render json: current_user.orders
@@ -44,7 +43,7 @@ Your app now supports AI agent connections with:
 
 ## How It Works
 
-1. User clicks "AI Agent Access" in your app
+1. User clicks "AgentAdmit" in your app
 2. Selects scopes and connection duration
 3. Gets a token to give to their AI agent
 4. Agent exchanges the token for scoped API access
@@ -112,7 +111,7 @@ end
 
 ## Documentation
 
-Full integration guide: https://docs.agentadmit.com/getting-started
+Full integration guide: https://agentadmit.com/docs/app-owner-guide
 
 ## License
 

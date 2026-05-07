@@ -8,7 +8,7 @@ Gem::Specification.new do |spec|
   spec.authors = ["Christopher Emerson"]
   spec.summary = "AgentAdmit SDK for Ruby on Rails — User-mediated AI agent authorization"
   spec.description = "Integrate AgentAdmit into your Rails app. Mandatory introspection, scope enforcement, and secure AI agent connections."
-  spec.homepage = "https://docs.agentadmit.com/sdk/rails"
+  spec.homepage = "https://agentadmit.com/docs"
   spec.license = "Nonstandard"
   spec.required_ruby_version = ">= 3.1.0"
 
