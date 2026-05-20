@@ -119,10 +119,9 @@ module AgentAdmit
 
     def build_request(uri, token)
       req = Net::HTTP::Post.new(uri.path)
-      req["Authorization"] = "Bearer #{token}"
-      req["X-App-Id"]      = @config.app_id
-      req["X-Api-Key"]     = @config.api_key
+      req["Authorization"] = "Bearer #{@config.api_key}"
       req["Content-Type"]  = "application/json"
+      req.body = JSON.generate({ token: token })
       req
     end
 
