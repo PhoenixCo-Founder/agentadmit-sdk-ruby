@@ -87,6 +87,15 @@ module AgentAdmit
         case status
         when 200
           data = JSON.parse(response.body)
+
+          # Check active flag (RFC 7662 introspection pattern).
+          # The verify endpoint returns {active: false} with HTTP 200 for invalid/
+          # expired/revoked tokens. Without this check, we'd read empty scopes.
+          unless data["active"]
+            reason = data["error"] || "invalid_token"
+            raise InvalidTokenError, "Token is not active: #{reason}"
+          end
+
           raise InvalidTokenError, "Introspection returned no user" if data["user_id"].nil?
 
           return IntrospectionResult.new(
