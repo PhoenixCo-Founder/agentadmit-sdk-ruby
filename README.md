@@ -137,3 +137,34 @@ For complete compliance guidance, see our [compliance guide](https://agentadmit.
 ## License
 
 All rights reserved. Patent pending.
+
+## Security Alerts
+
+```ruby
+alerts = AgentAdmit::AlertsClient.new
+```
+
+Six alert type constants: `ALERT_TYPE_VOLUME_SPIKE`, `ALERT_TYPE_FAILED_SCOPE_ATTEMPTS`, `ALERT_TYPE_BURST_PATTERN`, `ALERT_TYPE_STALE_REACTIVATION`, `ALERT_TYPE_NEW_SCOPE_USAGE`, `ALERT_TYPE_REVOKED_CONNECTION_ATTEMPT`.
+
+### Configure
+
+```ruby
+alerts.configure_alerts(
+  app_id: 'app_abc123',
+  alert_type: AgentAdmit::AlertsClient::ALERT_TYPE_VOLUME_SPIKE,
+  enabled: true, threshold_value: 100, threshold_window_minutes: 5,
+  kill_switch_enabled: true,
+)
+```
+
+### List Events
+
+```ruby
+result = alerts.list_alerts(app_id: 'app_abc123', alert_type: AgentAdmit::AlertsClient::ALERT_TYPE_VOLUME_SPIKE)
+```
+
+### Get Config
+
+```ruby
+config = alerts.get_alert_config(app_id: 'app_abc123')
+```

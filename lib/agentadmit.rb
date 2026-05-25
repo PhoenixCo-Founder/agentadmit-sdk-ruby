@@ -3,6 +3,7 @@
 require_relative "agentadmit/version"
 require_relative "agentadmit/config"
 require_relative "agentadmit/introspection_client"
+require_relative "agentadmit/alerts_client"
 require_relative "agentadmit/middleware"
 require_relative "agentadmit/scope_enforcement"
 require_relative "agentadmit/railtie" if defined?(Rails)
