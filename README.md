@@ -2,6 +2,9 @@
 
 User-mediated AI agent authorization. Plug-and-play for any Rails app.
 
+> **Get started:** Sign up at [agentadmit.com](https://agentadmit.com) → Get your test keys → Install the SDK → Build.
+> Test keys are available immediately after signup. Live keys become available when you subscribe an app.
+
 ## Quick Start
 
 ```ruby
