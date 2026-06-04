@@ -140,3 +140,43 @@ For complete compliance guidance, see our [compliance guide](https://agentadmit.
 ## License
 
 All rights reserved. Patent pending.
+
+## Security Alerts
+
+```ruby
+alerts = AgentAdmit::AlertsClient.new
+```
+
+Six alert type constants: `ALERT_TYPE_VOLUME_SPIKE`, `ALERT_TYPE_FAILED_SCOPE_ATTEMPTS`, `ALERT_TYPE_BURST_PATTERN`, `ALERT_TYPE_STALE_REACTIVATION`, `ALERT_TYPE_NEW_SCOPE_USAGE`, `ALERT_TYPE_REVOKED_CONNECTION_ATTEMPT`.
+
+### Configure
+
+```ruby
+alerts.configure_alerts(
+  app_id: 'app_abc123',
+  alert_type: AgentAdmit::AlertsClient::ALERT_TYPE_VOLUME_SPIKE,
+  enabled: true, threshold_value: 100, threshold_window_minutes: 5,
+  kill_switch_enabled: true,
+)
+```
+
+### List Events
+
+```ruby
+result = alerts.list_alerts(app_id: 'app_abc123', alert_type: AgentAdmit::AlertsClient::ALERT_TYPE_VOLUME_SPIKE)
+```
+
+### Get Config
+
+```ruby
+config = alerts.get_alert_config(app_id: 'app_abc123')
+```
+
+
+### Notifying Your Users
+
+AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes connections. **How you notify your own users is up to you.** AgentAdmit provides the data — you deliver it through your own system (in-app notifications, email, push, etc.).
+
+- **Poll alerts** — Use the SDK methods above from your backend to check for new events, then notify users through your existing system.
+- **Webhook delivery (coming soon)** — Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server.
+- **React SDK** — Embed the `<AlertsPanel>` component so users can view their own alert history and tighten thresholds.
