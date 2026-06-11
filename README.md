@@ -178,5 +178,47 @@ config = alerts.get_alert_config(app_id: 'app_abc123')
 AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes connections. **How you notify your own users is up to you.** AgentAdmit provides the data — you deliver it through your own system (in-app notifications, email, push, etc.).
 
 - **Poll alerts** — Use the SDK methods above from your backend to check for new events, then notify users through your existing system.
-- **Webhook delivery (coming soon)** — Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server.
+- **Webhook delivery** — Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server, signed with your `whsec_…` secret. Always verify the signature against the raw request body before trusting the payload:
+
+  ```ruby
+  # Rails controller
+  def alerts
+    AgentAdmit::Webhook.verify_signature(
+      request.raw_post,
+      request.headers["X-AgentAdmit-Signature"].to_s,
+      AgentAdmit.configuration.webhook_secret # whsec_… from AGENTADMIT_WEBHOOK_SECRET
+    )
+    event = JSON.parse(request.raw_post)
+    # ...
+    head :ok
+  rescue AgentAdmit::WebhookSignatureError
+    head :bad_request
+  end
+  ```
+
+  The header format is `t=<unix_ts>,v1=<hex>` — an HMAC-SHA256 of `{t}.{raw_body}` keyed with your signing secret. Verification compares in constant time and rejects timestamps more than 5 minutes off (replay protection).
 - **React SDK** — Embed the `<AlertsPanel>` component so users can view their own alert history and tighten thresholds.
+
+### Issuing & Exchanging Tokens
+
+```ruby
+tokens = AgentAdmit::TokensClient.new
+
+# Duration is tri-state:
+#   omit the argument          → AgentAdmit default (30 days)
+#   nil                        → until the user revokes
+#   Integer (60–31536000)      → explicit seconds
+issued = tokens.issue_token(
+  user_id: "user_42",
+  scopes: ["read:orders"],
+  role: "user",
+  duration_seconds: nil # until revoked
+)
+connection_token = issued["token"] # ag_ct_…
+
+# Agent side — no API key needed; the connection token is the credential.
+granted = tokens.exchange(connection_token, agent_label: "MyAssistant")
+
+# Revoke when the user disconnects the agent.
+tokens.revoke(granted["connection_id"], reason: "user_requested")
+```

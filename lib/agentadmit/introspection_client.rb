@@ -10,7 +10,8 @@ module AgentAdmit
   # No local JWT decode. Every verification call goes through AgentAdmit.
   #
   class IntrospectionClient
-    IntrospectionResult = Struct.new(:user_id, :connection_id, :scopes, :agent_label, keyword_init: true) do
+    IntrospectionResult = Struct.new(:user_id, :connection_id, :scopes, :agent_label,
+                                     :sub, :role, :app_id, :jti, :exp, keyword_init: true) do
       def has_scope?(scope)
         scopes.include?(scope)
       end
@@ -18,6 +19,7 @@ module AgentAdmit
 
     def initialize(config = nil)
       @config = config || AgentAdmit.configuration || Config.new
+      @config.validate_api_key!
     end
 
     ##
@@ -89,11 +91,19 @@ module AgentAdmit
           data = JSON.parse(response.body)
 
           # Check active flag (RFC 7662 introspection pattern).
-          # The verify endpoint returns {active: false} with HTTP 200 for invalid/
-          # expired/revoked tokens. Without this check, we'd read empty scopes.
+          # The verify endpoint returns {active: false} with HTTP 200 for
+          # invalid/expired/revoked tokens; the error code is one of
+          # VERIFY_ERROR_CODES (e.g. token_expired, connection_expired,
+          # environment_mismatch). Without this check, we'd read empty scopes.
           unless data["active"]
             reason = data["error"] || "invalid_token"
-            raise InvalidTokenError, "Token is not active: #{reason}"
+            raise InvalidTokenError.new("Token is not active: #{reason}", code: reason)
+          end
+
+          # insufficient_scope arrives with active: true (token valid,
+          # requested scope not granted).
+          if data["error"] == "insufficient_scope"
+            raise InsufficientScopeError, data["error_description"] || "Scope not granted"
           end
 
           raise InvalidTokenError, "Introspection returned no user" if data["user_id"].nil?
@@ -102,7 +112,12 @@ module AgentAdmit
             user_id:      data["user_id"],
             connection_id: data["connection_id"],
             scopes:       data["scopes"] || [],
-            agent_label:  data["agent_label"] || "Unknown Agent"
+            agent_label:  data["agent_label"] || "Unknown Agent",
+            sub:          data["sub"],
+            role:         data["role"],
+            app_id:       data["app_id"],
+            jti:          data["jti"],
+            exp:          data["exp"]
           )
         when 401
           data = JSON.parse(response.body) rescue {}
