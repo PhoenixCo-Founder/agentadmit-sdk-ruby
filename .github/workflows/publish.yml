@@ -33,6 +33,11 @@ jobs:
         with:
           ruby-version: '3.2'
 
+      # release-gem runs `bundle exec rake release`, so the bundle (incl. rake)
+      # must be installed first
+      - name: Install dependencies
+        run: bundle install
+
       - name: Check tag matches gem version
         run: |
           pkg="v$(ruby -Ilib -ragentadmit/version -e 'print AgentAdmit::VERSION')"
