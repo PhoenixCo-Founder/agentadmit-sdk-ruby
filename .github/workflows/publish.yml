@@ -1,0 +1,48 @@
+# Publish the agentadmit gem to RubyGems with Trusted Publishing (OIDC)
+#
+# Trusted Publishing eliminates long-lived RubyGems API keys.
+#
+# Prerequisites (one-time setup on rubygems.org):
+#   1. Own the gem: agentadmit
+#   2. Gem → Trusted publishers → Add GitHub Actions publisher:
+#      - Repository: PhoenixCo-Founder/agentadmit-sdk-ruby
+#      - Workflow filename: publish.yml
+#      - Environment: (leave blank)
+#
+# Trigger: push a version tag (e.g., git tag v1.0.0 && git push --tags)
+# Action versions are pinned to exact SHAs per supply chain policy.
+
+name: Publish to RubyGems
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: ruby/setup-ruby@12fd324f1d0b43274fdc8130f6980590a667c455 # v1.312.0
+        with:
+          ruby-version: '3.2'
+
+      - name: Check tag matches gem version
+        run: |
+          pkg="v$(ruby -Ilib -ragentadmit/version -e 'print AgentAdmit::VERSION')"
+          if [ "$pkg" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match AgentAdmit::VERSION $pkg" >&2
+            exit 1
+          fi
+
+      - name: Run tests
+        run: ruby test/webhook_test.rb
+
+      - name: Publish with trusted publishing
+        uses: rubygems/release-gem@6317d8d1f7e28c24d28f6eff169ea854948bd9f7 # v1.2.0
