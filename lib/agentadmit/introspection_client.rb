@@ -6,10 +6,15 @@ require "uri"
 
 module AgentAdmit
   ##
-  # Mandatory introspection client — validates tokens via AgentAdmit hosted service.
+  # Mandatory introspection client -- validates tokens via AgentAdmit hosted service.
   # No local JWT decode. Every verification call goes through AgentAdmit.
   #
   class IntrospectionClient
+    # Hard cap on any single retry wait -- including a server-supplied Retry-After.
+    MAX_RETRY_WAIT_MS = 30_000
+    # Hard cap on cumulative wait across all retries of a single verify call.
+    MAX_RETRY_BUDGET_MS = 120_000
+
     IntrospectionResult = Struct.new(:user_id, :connection_id, :scopes, :agent_label,
                                      :sub, :role, :app_id, :jti, :exp, keyword_init: true) do
       def has_scope?(scope)
@@ -41,6 +46,7 @@ module AgentAdmit
 
       max_retries = @config.respond_to?(:max_retries) ? @config.max_retries.to_i : 3
       delay_ms    = 1000 # initial backoff in milliseconds
+      waited_ms   = 0    # cumulative wait across retries
 
       uri  = URI.parse(@config.verify_url)
       http = build_http(uri)
@@ -72,10 +78,24 @@ module AgentAdmit
             )
           end
 
-          # Compute wait: honor Retry-After header or use exponential backoff, cap at 30s
-          wait_ms   = retry_after ? (retry_after * 1000).ceil : [delay_ms, 30_000].min
+          # Compute wait: Retry-After beats exponential backoff, but both are
+          # capped -- Retry-After is untrusted server input and must not pin
+          # the caller.
+          requested_ms = retry_after ? (retry_after * 1000).ceil : delay_ms
+          wait_ms   = [[requested_ms, 0].max, MAX_RETRY_WAIT_MS].min
           jitter_ms = rand(0..500)
           total_ms  = wait_ms + jitter_ms
+
+          if waited_ms + total_ms > MAX_RETRY_BUDGET_MS
+            raise RateLimitError.new(
+              "AgentAdmit rate limit retry budget (#{MAX_RETRY_BUDGET_MS / 1000}s) exhausted.",
+              retry_after: retry_after,
+              limit: rl_limit,
+              remaining: rl_remaining,
+              reset: rl_reset
+            )
+          end
+          waited_ms += total_ms
 
           warn "[AgentAdmit] Rate-limited (attempt #{attempt + 1}/#{max_retries}). " \
                "Retrying in #{total_ms}ms."
@@ -85,46 +105,48 @@ module AgentAdmit
           next
         end
 
-        # Non-429 response — process normally
-        case status
-        when 200
-          data = JSON.parse(response.body)
-
-          # Check active flag (RFC 7662 introspection pattern).
-          # The verify endpoint returns {active: false} with HTTP 200 for
-          # invalid/expired/revoked tokens; the error code is one of
-          # VERIFY_ERROR_CODES (e.g. token_expired, connection_expired,
-          # environment_mismatch). Without this check, we'd read empty scopes.
-          unless data["active"]
-            reason = data["error"] || "invalid_token"
-            raise InvalidTokenError.new("Token is not active: #{reason}", code: reason)
+        # Non-429: only treat 2xx as a candidate for a valid token.
+        unless (200..299).cover?(status)
+          if status == 401
+            data = JSON.parse(response.body) rescue {}
+            raise InvalidTokenError, data["error_description"] || "Token validation failed"
           end
-
-          # insufficient_scope arrives with active: true (token valid,
-          # requested scope not granted).
-          if data["error"] == "insufficient_scope"
-            raise InsufficientScopeError, data["error_description"] || "Scope not granted"
-          end
-
-          raise InvalidTokenError, "Introspection returned no user" if data["user_id"].nil?
-
-          return IntrospectionResult.new(
-            user_id:      data["user_id"],
-            connection_id: data["connection_id"],
-            scopes:       data["scopes"] || [],
-            agent_label:  data["agent_label"] || "Unknown Agent",
-            sub:          data["sub"],
-            role:         data["role"],
-            app_id:       data["app_id"],
-            jti:          data["jti"],
-            exp:          data["exp"]
-          )
-        when 401
-          data = JSON.parse(response.body) rescue {}
-          raise InvalidTokenError, data["error_description"] || "Token validation failed"
-        else
           raise IntrospectionError, "Verification service returned #{response.code}"
         end
+
+        # 2xx -- parse and strictly validate the response body.
+        data = begin
+          JSON.parse(response.body)
+        rescue JSON::ParserError
+          raise IntrospectionError, "Introspection response is not valid JSON"
+        end
+
+        # active must be strictly true (boolean).
+        unless data["active"] == true
+          reason = data["error"] || "invalid_token"
+          raise InvalidTokenError.new("Token is not active: #{reason}", code: reason)
+        end
+
+        # insufficient_scope arrives with active: true (token valid,
+        # requested scope not granted).
+        if data["error"] == "insufficient_scope"
+          raise InsufficientScopeError, data["error_description"] || "Scope not granted"
+        end
+
+        # Validate that consumed fields have the expected types when present.
+        validate_introspection_types!(data)
+
+        return IntrospectionResult.new(
+          user_id:      data["user_id"],
+          connection_id: data["connection_id"],
+          scopes:       data["scopes"] || [],
+          agent_label:  data["agent_label"] || "Unknown Agent",
+          sub:          data["sub"],
+          role:         data["role"],
+          app_id:       data["app_id"],
+          jti:          data["jti"],
+          exp:          data["exp"]
+        )
       end
 
       # Should never be reached
@@ -132,6 +154,36 @@ module AgentAdmit
     end
 
     private
+
+    ##
+    # Enforce that the fields the middleware relies on have the correct types.
+    # Any type mismatch means we cannot safely use the response -- treat as invalid.
+    #
+    # @raise [InvalidTokenError]
+    #
+    def validate_introspection_types!(data)
+      # user_id is required and must be a String.
+      unless data["user_id"].is_a?(String)
+        raise InvalidTokenError, "Introspection returned no user"
+      end
+
+      # agent_id, connection_id -- must be String when present.
+      %w[agent_id connection_id].each do |field|
+        val = data[field]
+        next if val.nil?
+        unless val.is_a?(String)
+          raise InvalidTokenError, "Introspection field '#{field}' must be a String"
+        end
+      end
+
+      # scopes -- must be Array of Strings when present.
+      if data.key?("scopes")
+        scopes = data["scopes"]
+        unless scopes.is_a?(Array) && scopes.all? { |s| s.is_a?(String) }
+          raise InvalidTokenError, "Introspection field 'scopes' must be an Array of Strings"
+        end
+      end
+    end
 
     def build_http(uri)
       http = Net::HTTP.new(uri.host, uri.port)

@@ -6,13 +6,17 @@ module AgentAdmit
   # and validates them via introspection.
   #
   # Sets env variables for downstream use:
-  #   env['agentadmit.auth_type']     — "agent" or nil
-  #   env['agentadmit.user_id']       — validated user ID
-  #   env['agentadmit.scopes']        — granted scopes array
-  #   env['agentadmit.connection_id'] — connection identifier
-  #   env['agentadmit.agent_label']   — agent display name
+  #   env['agentadmit.auth_type']     -- "agent" or nil
+  #   env['agentadmit.user_id']       -- validated user ID
+  #   env['agentadmit.scopes']        -- granted scopes array
+  #   env['agentadmit.connection_id'] -- connection identifier
+  #   env['agentadmit.agent_label']   -- agent display name
   #
   class Middleware
+    # RFC 7235: the auth-scheme token is case-insensitive.
+    # Match "bearer", "Bearer", "BEARER", etc. followed by the ag_at_ prefix.
+    BEARER_AGENT_RE = /\Abearer ag_at_/i
+
     def initialize(app)
       @app = app
       @client = IntrospectionClient.new
@@ -22,8 +26,9 @@ module AgentAdmit
     def call(env)
       auth = env["HTTP_AUTHORIZATION"] || ""
 
-      if auth.start_with?("Bearer #{@config.token_prefix_access}")
-        token = auth.sub("Bearer ", "")
+      if BEARER_AGENT_RE.match?(auth)
+        # Strip the scheme prefix (case-insensitively) to get the bare token.
+        token = auth.sub(/\Abearer /i, "")
 
         begin
           result = @client.verify(token)

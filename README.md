@@ -2,7 +2,7 @@
 
 User-mediated AI agent authorization. Plug-and-play for any Rails app.
 
-> **Get started:** Sign up at [agentadmit.com](https://agentadmit.com) → Get your test keys → Install the SDK → Build.
+> **Get started:** Sign up at [agentadmit.com](https://agentadmit.com) -- Get your test keys -- Install the SDK -- Build.
 > Test keys are available immediately after signup. Live keys become available when you subscribe an app.
 
 ## Quick Start
@@ -14,7 +14,6 @@ gem 'agentadmit'
 
 ```bash
 bundle install
-rails generate agentadmit:install
 ```
 
 Add your credentials to `config/credentials.yml.enc` or `.env`:
@@ -22,6 +21,14 @@ Add your credentials to `config/credentials.yml.enc` or `.env`:
 ```env
 AGENTADMIT_APP_ID=app_yourappid
 AGENTADMIT_API_KEY=aa_test_yourkey
+```
+
+Create an initializer at `config/initializers/agentadmit.rb`:
+
+```ruby
+AgentAdmit.configure do |config|
+  # Defaults are read from ENV - nothing required here unless you need overrides.
+end
 ```
 
 Add scope enforcement to any controller:
@@ -36,13 +43,16 @@ class OrdersController < ApplicationController
 end
 ```
 
+The `require_scope_if_agent!` method is available in all controllers automatically
+when you use Rails -- the Railtie includes `AgentAdmit::ScopeEnforcement` into
+`ActionController::Base` on load.
+
 Your app now supports AI agent connections with:
 - Scoped access control (you define the scopes)
 - User-controlled connection duration
 - Token generation and exchange
 - Mandatory introspection (every agent request validated through AgentAdmit)
-- Revocation and audit logging
-- Discovery endpoint at `/.well-known/agentadmit`
+- Revocation support via `tokens.revoke`
 
 ## How It Works
 
@@ -58,27 +68,25 @@ The token goes to the human, not the agent. No automated delivery = no prompt in
 
 **Mandatory introspection.** All token validation goes through api.agentadmit.com. There is no self-hosted mode. No local JWT validation. No bypass. This is required for security, audit logging, and scope enforcement.
 
-**Admin revocation.** As the app operator, you can revoke any user's agent connection via `DELETE /agentadmit/admin/connections/{connection_id}` (requires admin role or `manage:connections` scope).
-
 **Embeddable admin panel.** Drop the `<AgentAdmitAdminPanel>` React component into your admin section to view all agent connections, usage metrics, billing status, and revoke any connection without leaving your app. See the React SDK for details.
 
 **In-app AI scopes.** If your app has built-in AI features (analysis, plan generation, photo recognition), do not expose those as agent scopes. The user's AI agent can read the raw data and do the analysis itself. Exposing in-app AI endpoints to agents creates double cost.
 
 ## Rate Limiting
 
-The AgentAdmit introspection endpoint enforces rate limits. The Ruby SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter — no changes needed in your middleware code.
+The AgentAdmit introspection endpoint enforces rate limits. The Ruby SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter -- no changes needed in your middleware code.
 
 ### Retry behavior
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | Initial delay | 1 second | First retry wait |
-| Backoff multiplier | 2× | Doubles each retry |
+| Backoff multiplier | 2x | Doubles each retry |
 | Cap | 30 seconds | Maximum wait per retry |
-| Jitter | 0–500 ms | Random addition to each delay |
+| Jitter | 0-500 ms | Random addition to each delay |
 | Max retries | **3** | Configurable |
 
-The SDK also respects the `Retry-After` response header — if present, it overrides the computed backoff delay.
+The SDK also respects the `Retry-After` response header -- if present, it overrides the computed backoff delay.
 
 ### Configuring max retries
 
@@ -107,10 +115,10 @@ end
 ```
 
 `RateLimitError` attributes:
-- `retry_after` — seconds from `Retry-After` header (`nil` if absent)
-- `limit` — `X-RateLimit-Limit` header value (`nil` if absent)
-- `remaining` — `X-RateLimit-Remaining` header value (`nil` if absent)
-- `reset` — `X-RateLimit-Reset` Unix timestamp (`nil` if absent)
+- `retry_after` -- seconds from `Retry-After` header (`nil` if absent)
+- `limit` -- `X-RateLimit-Limit` header value (`nil` if absent)
+- `remaining` -- `X-RateLimit-Remaining` header value (`nil` if absent)
+- `reset` -- `X-RateLimit-Reset` Unix timestamp (`nil` if absent)
 
 ## Documentation
 
@@ -122,14 +130,14 @@ Full integration guide: https://agentadmit.com/docs/app-owner-guide
 The AgentAdmit Ruby SDK runs server-side and does not interact with app stores or end-user devices directly.
 
 ### What the SDK does
-- Validates AgentAdmit tokens by calling AgentAdmit's hosted introspection endpoint (`https://api.agentadmit.com/api/v1/verify`) on every agent request — this is mandatory introspection; there is no local or offline validation mode
+- Validates AgentAdmit tokens by calling AgentAdmit's hosted introspection endpoint (`https://api.agentadmit.com/api/v1/verify`) on every agent request -- this is mandatory introspection; there is no local or offline validation mode
 - Enforces scope-based access control on your API routes
-- Manages connection lifecycle (create, revoke, audit) using your configured storage backend
+- Manages connection lifecycle (create, revoke) using the AgentAdmit hosted service
 
 ### What the SDK does NOT do
-- Does not transmit raw end-user PII (such as name, email, or device identifiers) — each introspection request sends the opaque access token and your API key
-- Does not perform passive background telemetry or analytics — network calls occur only during active token validation
-- Does not maintain its own persistent storage — local state (connections, audit log) lives in the storage backend you configure
+- Does not transmit raw end-user PII (such as name, email, or device identifiers) -- each introspection request sends the opaque access token and your API key
+- Does not perform passive background telemetry or analytics -- network calls occur only during active token validation
+- Does not maintain its own persistent local storage
 
 ### What the AgentAdmit hosted service records
 On every token validation, AgentAdmit's `/api/v1/verify` endpoint receives the access token and API key, resolves the token to its `user_id`, `connection_id`, granted `scopes`, and `agent_label`, and records per-call metadata (including the endpoint and timestamp) for billing, audit logging, the security alerts engine, and usage metering. This is integral to how AgentAdmit works and applies to both test and live keys. See the "Mandatory introspection" notes above and the [compliance guide](https://agentadmit.com/docs/compliance) for the full data-handling description.
@@ -177,10 +185,10 @@ config = alerts.get_alert_config(app_id: 'app_abc123')
 
 ### Notifying Your Users
 
-AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes connections. **How you notify your own users is up to you.** AgentAdmit provides the data — you deliver it through your own system (in-app notifications, email, push, etc.).
+AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes connections. **How you notify your own users is up to you.** AgentAdmit provides the data -- you deliver it through your own system (in-app notifications, email, push, etc.).
 
-- **Poll alerts** — Use the SDK methods above from your backend to check for new events, then notify users through your existing system.
-- **Webhook delivery** — Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server, signed with your `whsec_…` secret. Always verify the signature against the raw request body before trusting the payload:
+- **Poll alerts** -- Use the SDK methods above from your backend to check for new events, then notify users through your existing system.
+- **Webhook delivery** -- Configure a webhook URL in your AgentAdmit dashboard. When an alert fires, AgentAdmit POSTs the payload to your server, signed with your `whsec_...` secret. Always verify the signature against the raw request body before trusting the payload:
 
   ```ruby
   # Rails controller
@@ -188,7 +196,7 @@ AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes 
     AgentAdmit::Webhook.verify_signature(
       request.raw_post,
       request.headers["X-AgentAdmit-Signature"].to_s,
-      AgentAdmit.configuration.webhook_secret # whsec_… from AGENTADMIT_WEBHOOK_SECRET
+      AgentAdmit.configuration.webhook_secret # whsec_... from AGENTADMIT_WEBHOOK_SECRET
     )
     event = JSON.parse(request.raw_post)
     # ...
@@ -198,8 +206,8 @@ AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes 
   end
   ```
 
-  The header format is `t=<unix_ts>,v1=<hex>` — an HMAC-SHA256 of `{t}.{raw_body}` keyed with your signing secret. Verification compares in constant time and rejects timestamps more than 5 minutes off (replay protection).
-- **React SDK** — Embed the `<AlertsPanel>` component so users can view their own alert history and tighten thresholds.
+  The header format is `t=<unix_ts>,v1=<hex>` -- an HMAC-SHA256 of `{t}.{raw_body}` keyed with your signing secret. Verification compares in constant time and rejects timestamps more than 5 minutes off (replay protection).
+- **React SDK** -- Embed the `<AlertsPanel>` component so users can view their own alert history and tighten thresholds.
 
 ### Issuing & Exchanging Tokens
 
@@ -207,18 +215,18 @@ AgentAdmit detects anomalies, fires alerts, and (with kill switch) auto-revokes 
 tokens = AgentAdmit::TokensClient.new
 
 # Duration is tri-state:
-#   omit the argument          → AgentAdmit default (30 days)
-#   nil                        → until the user revokes
-#   Integer (60–31536000)      → explicit seconds
+#   omit the argument          => AgentAdmit default (30 days)
+#   nil                        => until the user revokes
+#   Integer (60-31536000)      => explicit seconds
 issued = tokens.issue_token(
   user_id: "user_42",
   scopes: ["read:orders"],
   role: "user",
   duration_seconds: nil # until revoked
 )
-connection_token = issued["token"] # ag_ct_…
+connection_token = issued["token"] # ag_ct_...
 
-# Agent side — no API key needed; the connection token is the credential.
+# Agent side -- no API key needed; the connection token is the credential.
 granted = tokens.exchange(connection_token, agent_label: "MyAssistant")
 
 # Revoke when the user disconnects the agent.
