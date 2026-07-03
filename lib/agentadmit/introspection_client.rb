@@ -10,6 +10,11 @@ module AgentAdmit
   # No local JWT decode. Every verification call goes through AgentAdmit.
   #
   class IntrospectionClient
+    # Hard cap on any single retry wait — including a server-supplied Retry-After.
+    MAX_RETRY_WAIT_MS = 30_000
+    # Hard cap on cumulative wait across all retries of a single verify call.
+    MAX_RETRY_BUDGET_MS = 120_000
+
     IntrospectionResult = Struct.new(:user_id, :connection_id, :scopes, :agent_label,
                                      :sub, :role, :app_id, :jti, :exp, keyword_init: true) do
       def has_scope?(scope)
@@ -41,6 +46,7 @@ module AgentAdmit
 
       max_retries = @config.respond_to?(:max_retries) ? @config.max_retries.to_i : 3
       delay_ms    = 1000 # initial backoff in milliseconds
+      waited_ms   = 0    # cumulative wait across retries
 
       uri  = URI.parse(@config.verify_url)
       http = build_http(uri)
@@ -72,10 +78,24 @@ module AgentAdmit
             )
           end
 
-          # Compute wait: honor Retry-After header or use exponential backoff, cap at 30s
-          wait_ms   = retry_after ? (retry_after * 1000).ceil : [delay_ms, 30_000].min
+          # Compute wait: Retry-After beats exponential backoff, but both are
+          # capped — Retry-After is untrusted server input and must not pin
+          # the caller.
+          requested_ms = retry_after ? (retry_after * 1000).ceil : delay_ms
+          wait_ms   = [[requested_ms, 0].max, MAX_RETRY_WAIT_MS].min
           jitter_ms = rand(0..500)
           total_ms  = wait_ms + jitter_ms
+
+          if waited_ms + total_ms > MAX_RETRY_BUDGET_MS
+            raise RateLimitError.new(
+              "AgentAdmit rate limit retry budget (#{MAX_RETRY_BUDGET_MS / 1000}s) exhausted.",
+              retry_after: retry_after,
+              limit: rl_limit,
+              remaining: rl_remaining,
+              reset: rl_reset
+            )
+          end
+          waited_ms += total_ms
 
           warn "[AgentAdmit] Rate-limited (attempt #{attempt + 1}/#{max_retries}). " \
                "Retrying in #{total_ms}ms."
