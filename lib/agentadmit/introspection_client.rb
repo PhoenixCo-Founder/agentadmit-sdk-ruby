@@ -16,9 +16,16 @@ module AgentAdmit
     MAX_RETRY_BUDGET_MS = 120_000
 
     IntrospectionResult = Struct.new(:user_id, :connection_id, :scopes, :agent_label,
-                                     :sub, :role, :app_id, :jti, :exp, keyword_init: true) do
+                                     :sub, :role, :app_id, :jti, :exp, :consent, keyword_init: true) do
       def has_scope?(scope)
         scopes.include?(scope)
+      end
+
+      # Consent Ledger verdict for the external-agent path (additive; may be
+      # nil). A denied verdict means the app returns its own 403 -- the token
+      # itself stays valid (consent is orthogonal to revocation).
+      def consent_granted?
+        consent.nil? || consent["granted"] != false
       end
     end
 
@@ -136,6 +143,9 @@ module AgentAdmit
         # Validate that consumed fields have the expected types when present.
         validate_introspection_types!(data)
 
+        consent = data["consent"]
+        consent = nil unless consent.is_a?(Hash) && [true, false].include?(consent["granted"])
+
         return IntrospectionResult.new(
           user_id:      data["user_id"],
           connection_id: data["connection_id"],
@@ -145,12 +155,56 @@ module AgentAdmit
           role:         data["role"],
           app_id:       data["app_id"],
           jti:          data["jti"],
-          exp:          data["exp"]
+          exp:          data["exp"],
+          consent:      consent
         )
       end
 
       # Should never be reached
       raise IntrospectionError, "Unexpected exit from retry loop"
+    end
+
+    CALLER_CLASSES = %w[human_session in_app_ai external_agent].freeze
+
+    ##
+    # Ask the Consent Ledger whether a caller class may act on a user's data.
+    # Decision point for the token-less caller classes (human_session,
+    # in_app_ai); external agents get the same verdict on the verify result.
+    #
+    # @param app_user_id [String] your app's identifier for the data owner
+    # @param caller_class [String] "human_session" | "in_app_ai" | "external_agent"
+    # @param scope_group [String, nil] optional finer-than-class group
+    # @return [Hash] verdict: granted, caller_class, scope_group, source, evaluated_at
+    # @raise [ArgumentError] unknown caller_class
+    # @raise [IntrospectionError] hosted service unreachable or rejected the call
+    #
+    def check_consent(app_user_id:, caller_class:, scope_group: nil)
+      unless CALLER_CLASSES.include?(caller_class)
+        raise ArgumentError, "caller_class must be one of #{CALLER_CLASSES.join(', ')}"
+      end
+
+      uri  = URI.parse("#{@config.api_url.sub(%r{/\z}, '')}/api/v1/consent/check")
+      http = build_http(uri)
+
+      request = Net::HTTP::Post.new(uri.path)
+      request["Authorization"] = "Bearer #{@config.api_key}"
+      request["Content-Type"]  = "application/json"
+      body = { app_user_id: app_user_id, caller_class: caller_class }
+      body[:scope_group] = scope_group if scope_group
+      request.body = JSON.generate(body)
+
+      response = begin
+        http.request(request)
+      rescue StandardError => e
+        raise IntrospectionError, "Consent check failed: #{e.message}"
+      end
+
+      data = JSON.parse(response.body) rescue {}
+      unless (200..299).cover?(response.code.to_i)
+        raise IntrospectionError,
+              data["error_description"] || data["error"] || "Consent check returned #{response.code}"
+      end
+      data
     end
 
     private
