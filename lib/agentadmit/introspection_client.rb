@@ -24,8 +24,15 @@ module AgentAdmit
       # Consent Ledger verdict for the external-agent path (additive; may be
       # nil). A denied verdict means the app returns its own 403 -- the token
       # itself stays valid (consent is orthogonal to revocation).
+      #
+      # Contract (matches the PHP and Java SDKs): an ABSENT consent block
+      # means a legacy server that never sends one -- treated as allowed,
+      # which is also the platform default for the external-agent class. A
+      # PRESENT block grants only on an explicit boolean true; a missing or
+      # non-boolean granted value is treated as denied (malformed = deny).
       def consent_granted?
-        consent.nil? || consent["granted"] != false
+        return true if consent.nil?
+        consent["granted"] == true
       end
     end
 
@@ -143,8 +150,12 @@ module AgentAdmit
         # Validate that consumed fields have the expected types when present.
         validate_introspection_types!(data)
 
+        # Keep any PRESENT consent hash, even with a malformed granted value:
+        # coercing it to nil would read as "legacy server, allowed" in
+        # consent_granted?, silently failing open. A malformed verdict must
+        # stay visible so consent_granted? can deny it.
         consent = data["consent"]
-        consent = nil unless consent.is_a?(Hash) && [true, false].include?(consent["granted"])
+        consent = nil unless consent.is_a?(Hash)
 
         return IntrospectionResult.new(
           user_id:      data["user_id"],
@@ -199,12 +210,18 @@ module AgentAdmit
         raise IntrospectionError, "Consent check failed: #{e.message}"
       end
 
-      data = JSON.parse(response.body) rescue {}
       unless (200..299).cover?(response.code.to_i)
+        data = JSON.parse(response.body) rescue {}
         raise IntrospectionError,
               data["error_description"] || data["error"] || "Consent check returned #{response.code}"
       end
-      data
+
+      # 2xx -- parse strictly; a garbage body must not read as an empty verdict.
+      begin
+        JSON.parse(response.body)
+      rescue JSON::ParserError
+        raise IntrospectionError, "Consent check response is not valid JSON"
+      end
     end
 
     private
