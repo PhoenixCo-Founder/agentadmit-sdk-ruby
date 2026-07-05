@@ -16,7 +16,8 @@ module AgentAdmit
     MAX_RETRY_BUDGET_MS = 120_000
 
     IntrospectionResult = Struct.new(:user_id, :connection_id, :scopes, :agent_label,
-                                     :sub, :role, :app_id, :jti, :exp, :consent, keyword_init: true) do
+                                     :sub, :role, :app_id, :jti, :exp, :consent,
+                                     :presence, keyword_init: true) do
       def has_scope?(scope)
         scopes.include?(scope)
       end
@@ -33,6 +34,16 @@ module AgentAdmit
       def consent_granted?
         return true if consent.nil?
         consent["granted"] == true
+      end
+
+      # Human-presence fact from the WebAuthn step-up (additive; may be nil).
+      # True ONLY when the connection was authorized by a human who completed
+      # a presence ceremony on the consent page: verified must be the boolean
+      # true. Unlike consent, absence fails closed -- older servers never send
+      # the block, and connections minted without a ceremony carry
+      # verified: false, so nil/false/malformed all read as not verified.
+      def presence_verified?
+        presence.is_a?(Hash) && presence["verified"] == true
       end
     end
 
@@ -157,6 +168,13 @@ module AgentAdmit
         consent = data["consent"]
         consent = nil unless consent.is_a?(Hash)
 
+        # Presence rides along when the platform returns it. Same strictness
+        # as active: verified must be the boolean true or false, never coerced.
+        # Unlike consent, a malformed block is dropped -- presence_verified?
+        # fails closed on nil, so dropping cannot fail open.
+        presence = data["presence"]
+        presence = nil unless presence.is_a?(Hash) && [true, false].include?(presence["verified"])
+
         return IntrospectionResult.new(
           user_id:      data["user_id"],
           connection_id: data["connection_id"],
@@ -167,7 +185,8 @@ module AgentAdmit
           app_id:       data["app_id"],
           jti:          data["jti"],
           exp:          data["exp"],
-          consent:      consent
+          consent:      consent,
+          presence:     presence
         )
       end
 

@@ -96,6 +96,27 @@ head :forbidden unless verdict["granted"]
 
 Consent is orthogonal to revocation: a denied verdict means your app returns its own 403; the connection and token stay valid so the user can flip consent back on without re-connecting. Write switches through `PUT /api/v1/consent/settings` from your backend; export the audit trail with `GET /api/v1/consent/export` (every plan).
 
+### Presence verification
+
+AgentAdmit can attest that the human who authorized a connection completed a WebAuthn presence ceremony on the consent page. The verify result carries the fact:
+
+```ruby
+result = AgentAdmit::IntrospectionClient.new.verify(token)
+result.presence_verified?  # true only when the ceremony completed
+```
+
+For sensitive actions, enforce it in your controllers the same way you enforce scopes:
+
+```ruby
+class TransfersController < ApplicationController
+  include AgentAdmit::ScopeEnforcement
+
+  before_action -> { require_presence! }, only: [:create]
+end
+```
+
+`require_presence!` fails closed: agents whose connection was minted without a completed ceremony get a 403 `presence_required`, and so do connections from servers that predate the feature. `presence_verified?` returns true only on an explicit boolean `verified: true`; absent or malformed presence data reads as not verified.
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Ruby SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter -- no changes needed in your middleware code.

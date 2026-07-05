@@ -11,6 +11,7 @@ module AgentAdmit
   #   env['agentadmit.scopes']        -- granted scopes array
   #   env['agentadmit.connection_id'] -- connection identifier
   #   env['agentadmit.agent_label']   -- agent display name
+  #   env['agentadmit.presence']      -- human-presence block (Hash) or nil
   #
   class Middleware
     # RFC 7235: the auth-scheme token is case-insensitive.
@@ -37,6 +38,7 @@ module AgentAdmit
           env["agentadmit.scopes"] = result.scopes
           env["agentadmit.connection_id"] = result.connection_id
           env["agentadmit.agent_label"] = result.agent_label
+          env["agentadmit.presence"] = result.presence
         rescue InvalidTokenError => e
           return [401, { "Content-Type" => "application/json" },
             [{ error: "invalid_token", error_description: e.message }.to_json]]
