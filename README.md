@@ -96,6 +96,22 @@ head :forbidden unless verdict["granted"]
 
 Consent is orthogonal to revocation: a denied verdict means your app returns its own 403; the connection and token stay valid so the user can flip consent back on without re-connecting. Write switches through `PUT /api/v1/consent/settings` from your backend; export the audit trail with `GET /api/v1/consent/export` (every plan).
 
+**One-middleware drop-in.** Instead of wiring the three paths by hand, `AgentAdmit::CallerConsent` classifies the caller from the credential and evaluates the right independent path:
+
+```ruby
+use AgentAdmit::CallerConsent,
+    # derive the class from your own credential structure, never caller input
+    classify_non_agent: ->(env) {
+      env["HTTP_X_INTERNAL_AI"] == ENV["INTERNAL_AI_SECRET"] ? "in_app_ai" : "human_session"
+    },
+    resolve_data_owner_id: ->(env) { Rack::Request.new(env).params["owner_id"] },
+    required_scope: "read:records"
+# Downstream: env["agentadmit.caller_class"], env["agentadmit.consent"], and the
+# standard agent env variables on the external-agent path.
+```
+
+External agents are checked via hosted introspection (consent verdict plus scope); in-app AI via the Consent Ledger (fail closed); the human path defers to your own permission model unless `gate_human: true`. It is a consent gate, not an authenticator, so mount it after your own authentication.
+
 ### Presence verification
 
 AgentAdmit can attest that the human who authorized a connection completed a WebAuthn presence ceremony on the consent page. The verify result carries the fact:
