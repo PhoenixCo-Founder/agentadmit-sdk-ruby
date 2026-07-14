@@ -92,6 +92,7 @@ require_relative "agentadmit/tokens_client"
 require_relative "agentadmit/alerts_client"
 require_relative "agentadmit/webhook"
 require_relative "agentadmit/middleware"
+require_relative "agentadmit/caller_consent"
 # ScopeEnforcement is an ActiveSupport::Concern — only loadable inside Rails.
 require_relative "agentadmit/scope_enforcement" if defined?(ActiveSupport)
 require_relative "agentadmit/railtie" if defined?(Rails)
