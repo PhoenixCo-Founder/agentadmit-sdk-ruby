@@ -152,10 +152,12 @@ class ConsentGrantedStrictnessTest < Minitest::Test
     refute result_with_consent("caller_class" => "external_agent").consent_granted?
   end
 
-  def test_nil_consent_is_allowed_legacy_server
-    # Absent block = legacy server (or new-server omission); platform default
-    # for the external-agent class is allowed. Matches the PHP and Java SDKs.
-    assert result_with_consent(nil).consent_granted?
+  def test_nil_consent_is_never_a_grant
+    # The hosted service deliberately omits the block when its consent-store
+    # read fails (designed degraded mode). Absence is NEVER a grant: this
+    # predicate fails closed; CallerConsent resolves the authoritative
+    # verdict through the Consent Ledger.
+    refute result_with_consent(nil).consent_granted?
   end
 
   # -- via verify: consent block handling end to end --
@@ -174,11 +176,11 @@ class ConsentGrantedStrictnessTest < Minitest::Test
     refute result.consent_granted?
   end
 
-  def test_verify_without_consent_block_is_legacy_allowed
+  def test_verify_without_consent_block_fails_closed
     resp = ConsentStubHelpers::FakeResponse.new("200", {}, JSON.generate(ok_verify_body))
     result = build_client(resp).verify("ag_at_dummy")
     assert_nil result.consent
-    assert result.consent_granted?
+    refute result.consent_granted?, "absent verdict is never a grant"
   end
 
   def test_verify_with_malformed_consent_block_is_kept_and_denied

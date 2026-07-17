@@ -76,14 +76,23 @@ The token goes to the human, not the agent. No automated delivery = no prompt in
 
 AgentAdmit can host per-user consent switches for three independent caller classes: `human_session`, `in_app_ai`, and `external_agent`. No class's setting implies another's.
 
-**External agents:** the verify result already carries the verdict:
+**External agents:** the verify result already carries the verdict. The hosted service deliberately omits the verdict when its consent store is unreadable (degraded mode), so an absent verdict is *unresolved*, never a grant — `consent_granted?` fails closed on it. Resolve an absent or malformed verdict through the ledger:
 
 ```ruby
-result = AgentAdmit::IntrospectionClient.new.verify(token)
-unless result.consent_granted?
+client = AgentAdmit::IntrospectionClient.new
+result = client.verify(token)
+consent = result.consent
+unless consent.is_a?(Hash) && [true, false].include?(consent["granted"])
+  # absent/malformed verdict: the ledger holds the authoritative answer
+  consent = client.check_consent(app_user_id: result.user_id,
+                                 caller_class: "external_agent") # fail closed on error
+end
+unless consent["granted"] == true
   # the data owner has switched external agents off: return your own 403
 end
 ```
+
+The `AgentAdmit::CallerConsent` middleware does all of this for you: it evaluates the consent verdict **before** the scope check (a caller whose class the owner denied learns nothing about scope state) and resolves an absent verdict through the Consent Ledger, fail-closed.
 
 **Human sessions and in-app AI** never hold AgentAdmit tokens, so ask directly:
 

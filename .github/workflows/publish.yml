@@ -47,7 +47,20 @@ jobs:
           fi
 
       - name: Run tests
-        run: ruby test/webhook_test.rb
+        run: |
+          for f in test/*_test.rb; do
+            echo "== $f"
+            ruby "$f"
+          done
+
+      # Same clean-require gate as ci.yml: the built gem must load without the
+      # repo's dev deps (no Rails/ActiveSupport) before it may publish.
+      - name: Clean-install smoke
+        run: |
+          gem build agentadmit.gemspec
+          gem install ./agentadmit-*.gem
+          mkdir /tmp/smoke && cd /tmp/smoke
+          ruby -e "require 'agentadmit'; puts 'clean require OK'"
 
       - name: Publish with trusted publishing
         uses: rubygems/release-gem@6317d8d1f7e28c24d28f6eff169ea854948bd9f7 # v1.2.0
