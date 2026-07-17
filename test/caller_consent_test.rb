@@ -24,17 +24,24 @@ module CallerConsentStubHelpers
   end
 
   # Build a middleware whose IntrospectionClient talks to a fake HTTP layer.
-  # ledger_calls counts /consent/check round-trips so tests can prove the
-  # human path never asks the ledger.
-  def build_middleware(app, response, ledger_calls: nil, **opts)
+  # ledger_calls counts fake round-trips so tests can prove the human path
+  # never asks the ledger. response may be an Array: each round-trip consumes
+  # the next entry (a nil entry raises, simulating a network failure), which
+  # lets one test serve introspection and the /consent/check fallback
+  # different responses. requests records every Net::HTTP request so tests
+  # can assert what was sent where.
+  def build_middleware(app, response, ledger_calls: nil, requests: nil, **opts)
     mw = AgentAdmit::CallerConsent.new(app, **opts)
     client = AgentAdmit::IntrospectionClient.new(stub_config)
+    queue = response.is_a?(Array) ? response.dup : nil
     fake_http = Object.new
-    fake_http.define_singleton_method(:request) do |_req|
+    fake_http.define_singleton_method(:request) do |req|
       ledger_calls&.call
-      raise StandardError, "network down" if response.nil?
+      requests&.push(req)
+      current = queue ? queue.shift : response
+      raise StandardError, "network down" if current.nil?
 
-      response
+      current
     end
     client.define_singleton_method(:build_http) { |_uri| fake_http }
     mw.instance_variable_set(:@client, client)
@@ -51,8 +58,22 @@ module CallerConsentStubHelpers
       "user_id" => "user_1",
       "connection_id" => "conn_1",
       "scopes" => ["read:things"],
-      "agent_label" => "Test Agent"
+      "agent_label" => "Test Agent",
+      "consent" => { "caller_class" => "external_agent", "granted" => true,
+                     "source" => "app_default", "evaluated_at" => "x" }
     }.merge(overrides)
+  end
+
+  # Introspection response WITHOUT a consent verdict -- the hosted service
+  # omits the block when its consent-store read fails (designed degraded
+  # mode); the SDK must resolve the verdict through the Consent Ledger.
+  def verify_body_no_verdict
+    ok_verify_body.tap { |h| h.delete("consent") }
+  end
+
+  def ledger_verdict(granted)
+    { "caller_class" => "external_agent", "granted" => granted,
+      "source" => granted ? "app_default" : "setting", "evaluated_at" => "x" }
   end
 
   def ok_response(body)
@@ -120,9 +141,63 @@ class CallerConsentExternalAgentTest < Minitest::Test
     assert_equal "consent_not_granted", parse(resp)["error"]
   end
 
-  def test_allows_without_consent_block
-    status, _h, _b = build_middleware(ok_app, ok_response(ok_verify_body)).call(agent_env)
+  # Consent BEFORE scope (Patent FIG. 3 stage order): a caller whose class the
+  # owner denied must not learn scope state -- no insufficient_scope, no
+  # granted_scopes, even when the scope is ALSO missing.
+  def test_denied_consent_wins_over_missing_scope
+    body = ok_verify_body("consent" => { "caller_class" => "external_agent", "granted" => false, "source" => "setting" })
+    status, _h, resp = build_middleware(ok_app, ok_response(body), required_scope: "write:things").call(agent_env)
+
+    assert_equal 403, status
+    parsed = parse(resp)
+    assert_equal "consent_not_granted", parsed["error"]
+    refute parsed.key?("granted_scopes"), "denied class must not learn scope state"
+    refute parsed.key?("required_scope")
+  end
+
+  def test_absent_verdict_resolved_via_ledger_allow
+    requests = []
+    env = agent_env
+    responses = [ok_response(verify_body_no_verdict), ok_response(ledger_verdict(true))]
+    status, _h, _b = build_middleware(ok_app, responses, requests: requests, scope_group: "reports").call(env)
+
     assert_equal 200, status
+    assert_equal 2, requests.length, "introspection + ledger fallback"
+    assert_match %r{/consent/check\z}, requests[1].path
+    ledger_body = JSON.parse(requests[1].body)
+    assert_equal "external_agent", ledger_body["caller_class"]
+    assert_equal "reports", ledger_body["scope_group"]
+    assert_equal "user_1", ledger_body["app_user_id"], "owner comes from the introspection result"
+    assert_equal true, env["agentadmit.consent"]["granted"], "resolved verdict lands in the env"
+  end
+
+  def test_absent_verdict_resolved_via_ledger_deny
+    responses = [ok_response(verify_body_no_verdict), ok_response(ledger_verdict(false))]
+    status, _h, body = build_middleware(ok_app, responses).call(agent_env)
+
+    assert_equal 403, status
+    assert_equal "consent_not_granted", parse(body)["error"]
+  end
+
+  def test_absent_verdict_with_ledger_error_fails_closed
+    responses = [ok_response(verify_body_no_verdict), nil] # ledger round-trip raises
+    status, _h, body = build_middleware(ok_app, responses).call(agent_env)
+
+    assert_equal 503, status
+    assert_equal "consent_unavailable", parse(body)["error"]
+  end
+
+  def test_malformed_verdict_resolved_via_ledger
+    # A present block with a non-boolean granted is malformed -- never a
+    # grant; the ledger holds the authoritative answer.
+    body = ok_verify_body("consent" => { "caller_class" => "external_agent", "granted" => "yes" })
+    requests = []
+    responses = [ok_response(body), ok_response(ledger_verdict(true))]
+    status, _h, _b = build_middleware(ok_app, responses, requests: requests).call(agent_env)
+
+    assert_equal 200, status
+    assert_equal 2, requests.length, "malformed verdict must be re-resolved via the ledger"
+    assert_match %r{/consent/check\z}, requests[1].path
   end
 
   def test_rejects_invalid_token

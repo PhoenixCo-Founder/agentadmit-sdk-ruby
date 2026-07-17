@@ -18,7 +18,9 @@ module AgentAdmit
   #
   #  - external_agent: an ag_at_ access token -> hosted introspection, which
   #    returns the external-agent consent verdict inline plus the granted
-  #    scopes. Enforced here directly.
+  #    scopes. Consent is evaluated BEFORE scope (a denied class must not
+  #    learn scope state). A missing or malformed verdict is resolved through
+  #    the Consent Ledger, fail-closed -- absence is never a grant.
   #  - in_app_ai: your application's own server-side AI code path -> the
   #    Consent Ledger /consent/check for the in-app-AI class.
   #  - human_session: your application's own permission model (sharing,
@@ -121,8 +123,12 @@ module AgentAdmit
 
     ##
     # External-agent path: hosted introspection carries the verdict and the
-    # scopes. A present-and-denied verdict fails closed; an absent verdict
-    # means the platform default (external-agent allowed) held.
+    # scopes. Consent is evaluated first (Patent FIG. 3: the class consent
+    # decision precedes scope evaluation) -- checking scope first would leak
+    # granted-scope state to callers whose class the owner has denied. The
+    # hosted service omits the verdict when its consent-store read fails
+    # (designed degraded mode), so an absent or malformed verdict is resolved
+    # through the Consent Ledger, fail-closed -- never treated as a grant.
     #
     def call_external_agent(env)
       token = (env["HTTP_AUTHORIZATION"] || "").sub(/\Abearer /i, "")
@@ -135,6 +141,27 @@ module AgentAdmit
         return json_error(502, "introspection_failed", e.message)
       end
 
+      consent = result.consent
+      unless consent.is_a?(Hash) && [true, false].include?(consent["granted"])
+        owner = result.user_id
+        if !owner.is_a?(String) || owner.empty?
+          return json_error(503, "consent_unavailable",
+                            "Introspection carried no consent verdict and no resolvable data owner")
+        end
+
+        begin
+          consent = @client.check_consent(app_user_id: owner, caller_class: EXTERNAL_AGENT,
+                                          scope_group: @scope_group)
+        rescue StandardError
+          return json_error(503, "consent_unavailable", "Consent check failed")
+        end
+      end
+
+      unless consent.is_a?(Hash) && consent["granted"] == true
+        return json_error(403, "consent_not_granted",
+                          "The data owner has not enabled external agent access.")
+      end
+
       if @required_scope && !(result.scopes || []).include?(@required_scope)
         return [403, { "Content-Type" => "application/json" },
                 [{ error: "insufficient_scope",
@@ -143,16 +170,13 @@ module AgentAdmit
                    message: "This action requires '#{@required_scope}' scope." }.to_json]]
       end
 
-      return json_error(403, "consent_not_granted",
-                        "The data owner has not enabled external agent access.") unless result.consent_granted?
-
       env["agentadmit.auth_type"] = "agent"
       env["agentadmit.user_id"] = result.user_id
       env["agentadmit.scopes"] = result.scopes
       env["agentadmit.connection_id"] = result.connection_id
       env["agentadmit.agent_label"] = result.agent_label
       env["agentadmit.presence"] = result.presence
-      env["agentadmit.consent"] = result.consent if result.consent
+      env["agentadmit.consent"] = consent
 
       @app.call(env)
     end

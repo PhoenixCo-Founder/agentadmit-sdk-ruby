@@ -26,22 +26,24 @@ module AgentAdmit
       # nil). A denied verdict means the app returns its own 403 -- the token
       # itself stays valid (consent is orthogonal to revocation).
       #
-      # Contract (matches the PHP and Java SDKs): an ABSENT consent block
-      # means a legacy server that never sends one -- treated as allowed,
-      # which is also the platform default for the external-agent class. A
-      # PRESENT block grants only on an explicit boolean true; a missing or
-      # non-boolean granted value is treated as denied (malformed = deny).
+      # Contract: grants ONLY on an explicit boolean true. An ABSENT block is
+      # NEVER a grant -- the hosted service deliberately omits it when its
+      # consent-store read fails (designed degraded mode), so absence here
+      # fails closed. A missing or non-boolean granted value is likewise
+      # denied (malformed = deny). Callers that want the authoritative answer
+      # for an absent/malformed verdict should resolve it through
+      # #check_consent for the external_agent class (CallerConsent does this
+      # automatically).
       def consent_granted?
-        return true if consent.nil?
-        consent["granted"] == true
+        consent.is_a?(Hash) && consent["granted"] == true
       end
 
       # Human-presence fact from the WebAuthn step-up (additive; may be nil).
       # True ONLY when the connection was authorized by a human who completed
       # a presence ceremony on the consent page: verified must be the boolean
-      # true. Unlike consent, absence fails closed -- older servers never send
-      # the block, and connections minted without a ceremony carry
-      # verified: false, so nil/false/malformed all read as not verified.
+      # true. Absence fails closed -- older servers never send the block, and
+      # connections minted without a ceremony carry verified: false, so
+      # nil/false/malformed all read as not verified.
       def presence_verified?
         presence.is_a?(Hash) && presence["verified"] == true
       end
@@ -161,17 +163,17 @@ module AgentAdmit
         # Validate that consumed fields have the expected types when present.
         validate_introspection_types!(data)
 
-        # Keep any PRESENT consent hash, even with a malformed granted value:
-        # coercing it to nil would read as "legacy server, allowed" in
-        # consent_granted?, silently failing open. A malformed verdict must
-        # stay visible so consent_granted? can deny it.
+        # Keep the consent block only when it is a Hash; anything else reads
+        # as nil. Absent and malformed are both safe: neither is ever a grant
+        # (consent_granted? fails closed, and CallerConsent resolves the
+        # authoritative verdict through the Consent Ledger).
         consent = data["consent"]
         consent = nil unless consent.is_a?(Hash)
 
         # Presence rides along when the platform returns it. Same strictness
         # as active: verified must be the boolean true or false, never coerced.
-        # Unlike consent, a malformed block is dropped -- presence_verified?
-        # fails closed on nil, so dropping cannot fail open.
+        # A malformed block is dropped -- presence_verified? fails closed on
+        # nil, so dropping cannot fail open.
         presence = data["presence"]
         presence = nil unless presence.is_a?(Hash) && [true, false].include?(presence["verified"])
 

@@ -1,0 +1,59 @@
+# CI: tests + clean-install smoke on every push/PR to main.
+#
+# The clean-install smoke exists because of a shipped class of bug in the
+# sibling SDKs: every dev environment carried the dev/framework deps, so a
+# bare install of the published package crashed on require/import while all
+# tests stayed green. Building the gem and requiring it from an environment
+# WITHOUT the repo's dev deps (no bundle install, no Rails/ActiveSupport) is
+# the only check that catches that class of bug — it also keeps the Rails
+# coupling behind its defined?() guards honest.
+# Action versions are pinned to exact SHAs per supply chain policy.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: ruby/setup-ruby@12fd324f1d0b43274fdc8130f6980590a667c455 # v1.312.0
+        with:
+          ruby-version: '3.2'
+
+      - name: Install dependencies
+        run: bundle install
+
+      - name: Run tests (per file, matching local workflow)
+        run: |
+          for f in test/*_test.rb; do
+            echo "== $f"
+            ruby "$f"
+          done
+
+  # Separate job on purpose: no bundle install, so the gem is required in an
+  # environment without the repo's dev deps.
+  clean-install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: ruby/setup-ruby@12fd324f1d0b43274fdc8130f6980590a667c455 # v1.312.0
+        with:
+          ruby-version: '3.2'
+
+      - name: Build, install, and require the gem (no dev deps)
+        run: |
+          gem build agentadmit.gemspec
+          gem install ./agentadmit-*.gem
+          mkdir /tmp/smoke && cd /tmp/smoke
+          ruby -e "require 'agentadmit'; puts 'clean require OK'"
