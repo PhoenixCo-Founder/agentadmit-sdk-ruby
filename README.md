@@ -302,3 +302,26 @@ granted = tokens.exchange(connection_token, agent_label: "MyAssistant")
 # Revoke when the user disconnects the agent.
 tokens.revoke(granted["connection_id"], reason: "user_requested")
 ```
+
+### Declared purpose
+
+Declared purpose: the user-facing reason recorded on the grant at the consent moment. Review-time record only, never an enforcement input; authorization decisions ride scopes, connection status, and consent.
+
+Pass it when issuing a connection token (optional, max 300 characters; omitted from the request when `nil`):
+
+```ruby
+issued = tokens.issue_token(
+  user_id: "user_42",
+  scopes: ["read:orders"],
+  purpose: "Book quarterly travel for the sales team"
+)
+```
+
+The verify result carries it back for display in dashboards, review screens, and audit views:
+
+```ruby
+result = AgentAdmit::IntrospectionClient.new.verify(token)
+result.purpose # => "Book quarterly travel for the sales team" or nil
+```
+
+`purpose` is nullable -- connections issued without one (or by servers that predate the field) read as `nil`. Do not branch authorization on it; keep enforcement on scopes, connection status, and consent.
