@@ -15,6 +15,9 @@ module AgentAdmit
     # instead for an until-revoked connection (explicit JSON null).
     UNSET = Object.new.freeze
 
+    # Maximum length of a declared purpose (matches the hosted API contract).
+    PURPOSE_MAX_LENGTH = 300
+
     def initialize(config = nil)
       @config = config || AgentAdmit.configuration || Config.new
       @config.validate_api_key!
@@ -34,13 +37,24 @@ module AgentAdmit
     # @param scopes [Array<String>] scopes the connection grants
     # @param role [String, nil] the user's role on the connection
     # @param duration_seconds [Integer, nil, UNSET] see above
+    # @param purpose [String, nil] declared purpose: the user-facing reason
+    #   recorded on the grant at the consent moment. Review-time record only,
+    #   never an enforcement input; authorization decisions ride scopes,
+    #   connection status, and consent. Max 300 characters; omitted from the
+    #   request when nil.
     # @return [Hash] the issue response — "token" is the self-describing
     #   ag_ct_… connection token to hand to the user's agent
+    # @raise [ArgumentError] if purpose exceeds 300 characters
     # @raise [IntrospectionError] if issuance fails
     #
-    def issue_token(user_id:, scopes:, role: nil, duration_seconds: UNSET)
+    def issue_token(user_id:, scopes:, role: nil, duration_seconds: UNSET, purpose: nil)
+      if purpose && purpose.length > PURPOSE_MAX_LENGTH
+        raise ArgumentError, "purpose must be at most #{PURPOSE_MAX_LENGTH} characters"
+      end
+
       body = { "user_id" => user_id, "scopes" => scopes }
       body["role"] = role if role
+      body["purpose"] = purpose if purpose
       # Tri-state: the UNSET sentinel omits the key entirely; nil survives
       # JSON.generate as explicit JSON null (no compact, no nil-guard).
       body["duration_seconds"] = duration_seconds unless duration_seconds.equal?(UNSET)

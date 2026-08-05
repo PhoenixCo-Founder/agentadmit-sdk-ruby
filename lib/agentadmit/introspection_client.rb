@@ -17,7 +17,7 @@ module AgentAdmit
 
     IntrospectionResult = Struct.new(:user_id, :connection_id, :scopes, :agent_label,
                                      :sub, :role, :app_id, :jti, :exp, :consent,
-                                     :presence, keyword_init: true) do
+                                     :presence, :purpose, keyword_init: true) do
       def has_scope?(scope)
         scopes.include?(scope)
       end
@@ -47,6 +47,11 @@ module AgentAdmit
       def presence_verified?
         presence.is_a?(Hash) && presence["verified"] == true
       end
+
+      # `purpose` (String or nil) is the declared purpose: the user-facing
+      # reason recorded on the grant at the consent moment. Review-time record
+      # only, never an enforcement input; authorization decisions ride scopes,
+      # connection status, and consent.
     end
 
     def initialize(config = nil)
@@ -177,6 +182,12 @@ module AgentAdmit
         presence = data["presence"]
         presence = nil unless presence.is_a?(Hash) && [true, false].include?(presence["verified"])
 
+        # Declared purpose passes through as-is when it is a String (the
+        # hosted /verify returns it nullable). It is a review-time record,
+        # never an enforcement input, so a malformed value is simply dropped.
+        purpose = data["purpose"]
+        purpose = nil unless purpose.is_a?(String)
+
         return IntrospectionResult.new(
           user_id:      data["user_id"],
           connection_id: data["connection_id"],
@@ -188,7 +199,8 @@ module AgentAdmit
           jti:          data["jti"],
           exp:          data["exp"],
           consent:      consent,
-          presence:     presence
+          presence:     presence,
+          purpose:      purpose
         )
       end
 
