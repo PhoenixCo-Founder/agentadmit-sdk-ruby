@@ -1,5 +1,5 @@
 # frozen_string_literal: true
 
 module AgentAdmit
-  VERSION = "1.5.1"
+  VERSION = "1.7.0"
 end
