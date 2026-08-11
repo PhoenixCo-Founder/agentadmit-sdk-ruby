@@ -6,10 +6,12 @@
 # scopes, connection status, and consent.
 #
 # Covers: issue_token sending/omitting "user_intent" in the request body, the
-# metadata-tolerance normalization (malformed / empty / over-300 values
-# normalize to nil and are omitted -- never a rejection, unlike purpose's
-# ArgumentError), and verify passing the nullable user_intent through to
-# IntrospectionResult.
+# purpose-parity outbound validation (a non-String, non-nil value or a string
+# over 300 characters raises ArgumentError before any request is sent --
+# silently discarding the user's typed words would be data loss; empty and
+# whitespace-only strings still normalize to nil and are omitted), and verify
+# passing the nullable user_intent through to IntrospectionResult (response
+# side stays tolerant: a malformed value parses to nil).
 
 require "minitest/autorun"
 require "json"
@@ -47,11 +49,22 @@ class IssueTokenUserIntentTest < Minitest::Test
     assert_equal "i" * 300, body["user_intent"]
   end
 
-  def test_user_intent_over_300_chars_normalizes_to_nil_without_raising
-    # Metadata tolerance: unlike purpose (which raises ArgumentError over
-    # 300), a too-long user_intent normalizes to nil and is omitted.
-    body = issue_body(user_intent: "i" * 301)
-    refute_includes body.keys, "user_intent"
+  def test_user_intent_over_300_chars_raises_argument_error_before_any_request
+    # Purpose parity: like purpose, a too-long user_intent raises rather
+    # than silently discarding the user's typed words (data loss).
+    error = assert_raises(ArgumentError) do
+      issue_body(user_intent: "i" * 301)
+    end
+    assert_match(/300/, error.message)
+    refute @post_called, "issue_token must raise before any request is sent"
+  end
+
+  def test_non_string_user_intent_raises_argument_error_before_any_request
+    error = assert_raises(ArgumentError) do
+      issue_body(user_intent: { "text" => "x" })
+    end
+    assert_match(/String or nil/, error.message)
+    refute @post_called, "issue_token must raise before any request is sent"
   end
 
   def test_empty_string_user_intent_normalizes_to_nil
@@ -64,11 +77,6 @@ class IssueTokenUserIntentTest < Minitest::Test
     refute_includes body.keys, "user_intent"
   end
 
-  def test_non_string_user_intent_normalizes_to_nil
-    body = issue_body(user_intent: { "text" => "x" })
-    refute_includes body.keys, "user_intent"
-  end
-
   def test_user_intent_and_purpose_travel_independently
     body = issue_body(purpose: "App's words", user_intent: "User's words")
     assert_equal "App's words", body["purpose"]
@@ -77,11 +85,16 @@ class IssueTokenUserIntentTest < Minitest::Test
 
   private
 
-  # Build the issue_token request body without an HTTP round-trip.
+  # Build the issue_token request body without an HTTP round-trip. Records
+  # whether #post was reached in @post_called so raise-path tests can assert
+  # that validation fires before any request.
   def issue_body(**kwargs)
     captured = nil
+    @post_called = false
+    test = self
     client = AgentAdmit::TokensClient.new(config)
     client.define_singleton_method(:post) do |_path, body, **|
+      test.instance_variable_set(:@post_called, true)
       captured = body
       {}
     end
