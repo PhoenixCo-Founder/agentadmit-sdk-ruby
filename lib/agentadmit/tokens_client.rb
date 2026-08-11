@@ -18,6 +18,10 @@ module AgentAdmit
     # Maximum length of a declared purpose (matches the hosted API contract).
     PURPOSE_MAX_LENGTH = 300
 
+    # Maximum length of a user-declared intent (matches the hosted API
+    # contract: optional string, 1..300 characters).
+    USER_INTENT_MAX_LENGTH = 300
+
     def initialize(config = nil)
       @config = config || AgentAdmit.configuration || Config.new
       @config.validate_api_key!
@@ -42,19 +46,41 @@ module AgentAdmit
     #   never an enforcement input; authorization decisions ride scopes,
     #   connection status, and consent. Max 300 characters; omitted from the
     #   request when nil.
+    # @param user_intent [String, nil] user-declared intent: the user's OWN
+    #   words, typed at the consent moment (distinct from purpose, which is
+    #   the app's words). Optional, 1-300 characters. Validated like purpose:
+    #   a non-String, non-nil value or a string over 300 characters raises
+    #   ArgumentError before any request is sent — silently discarding the
+    #   user's typed words would be data loss. Empty/whitespace-only strings
+    #   normalize to nil and are omitted. Like purpose, it is a review-time
+    #   record, never an enforcement input.
     # @return [Hash] the issue response — "token" is the self-describing
     #   ag_ct_… connection token to hand to the user's agent
-    # @raise [ArgumentError] if purpose exceeds 300 characters
+    # @raise [ArgumentError] if purpose exceeds 300 characters, or if
+    #   user_intent is a non-String (other than nil) or exceeds 300 characters
     # @raise [IntrospectionError] if issuance fails
     #
-    def issue_token(user_id:, scopes:, role: nil, duration_seconds: UNSET, purpose: nil)
+    def issue_token(user_id:, scopes:, role: nil, duration_seconds: UNSET, purpose: nil,
+                    user_intent: nil)
       if purpose && purpose.length > PURPOSE_MAX_LENGTH
         raise ArgumentError, "purpose must be at most #{PURPOSE_MAX_LENGTH} characters"
       end
 
+      # User-declared intent is validated like purpose: reject out-of-contract
+      # values before any request rather than silently discarding the user's
+      # typed words (data loss). Empty/whitespace-only normalizes to nil-omit.
+      unless user_intent.nil? || user_intent.is_a?(String)
+        raise ArgumentError, "user_intent must be a String or nil"
+      end
+      if user_intent && user_intent.length > USER_INTENT_MAX_LENGTH
+        raise ArgumentError, "user_intent must be at most #{USER_INTENT_MAX_LENGTH} characters"
+      end
+      user_intent = nil if user_intent && user_intent.strip.empty?
+
       body = { "user_id" => user_id, "scopes" => scopes }
       body["role"] = role if role
       body["purpose"] = purpose if purpose
+      body["user_intent"] = user_intent if user_intent
       # Tri-state: the UNSET sentinel omits the key entirely; nil survives
       # JSON.generate as explicit JSON null (no compact, no nil-guard).
       body["duration_seconds"] = duration_seconds unless duration_seconds.equal?(UNSET)
