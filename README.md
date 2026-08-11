@@ -325,3 +325,27 @@ result.purpose # => "Book quarterly travel for the sales team" or nil
 ```
 
 `purpose` is nullable -- connections issued without one (or by servers that predate the field) read as `nil`. Do not branch authorization on it; keep enforcement on scopes, connection status, and consent.
+
+### User-declared intent
+
+User-declared intent: the user's OWN words, typed at the consent moment. `purpose` is the app's words for why the connection exists; `user_intent` is what the user actually said they wanted ("build me a weekly workout summary"). On the hosted consent page the user can type it into an optional field; apps collecting consent in their own UI can pass it at token issuance.
+
+Pass it when issuing a connection token (optional, 1-300 characters; a malformed value -- non-string, empty, or over 300 characters -- normalizes to `nil` and is omitted from the request rather than rejected):
+
+```ruby
+issued = tokens.issue_token(
+  user_id: "user_42",
+  scopes: ["read:orders"],
+  purpose: "Book quarterly travel for the sales team",
+  user_intent: "Book my flights to the Austin offsite in October"
+)
+```
+
+It flows exactly like purpose: stored on the connection, returned by verify, stamped into every audit row, and carried on grant and revocation ledger events. When the hosted presence ceremony runs, the user's own words are included in the verifiable-consent-evidence commitment, so their authenticator signs what they said they wanted.
+
+```ruby
+result = AgentAdmit::IntrospectionClient.new.verify(token)
+result.user_intent # => "Book my flights to the Austin offsite in October" or nil
+```
+
+`user_intent` is nullable -- connections issued without one (or by servers that predate the field) read as `nil`. Months later, a review screen can answer "is this still appropriate?" with the user's own stated boundary, not just the app's. Like purpose, it is a review-time record and never an enforcement input; authorization decisions ride scopes, connection status, and consent.

@@ -18,6 +18,10 @@ module AgentAdmit
     # Maximum length of a declared purpose (matches the hosted API contract).
     PURPOSE_MAX_LENGTH = 300
 
+    # Maximum length of a user-declared intent (matches the hosted API
+    # contract: optional string, 1..300 characters).
+    USER_INTENT_MAX_LENGTH = 300
+
     def initialize(config = nil)
       @config = config || AgentAdmit.configuration || Config.new
       @config.validate_api_key!
@@ -42,19 +46,36 @@ module AgentAdmit
     #   never an enforcement input; authorization decisions ride scopes,
     #   connection status, and consent. Max 300 characters; omitted from the
     #   request when nil.
+    # @param user_intent [String, nil] user-declared intent: the user's OWN
+    #   words, typed at the consent moment (distinct from purpose, which is
+    #   the app's words). Optional, 1-300 characters. Metadata tolerance:
+    #   a malformed value (non-String, empty/whitespace-only, or over 300
+    #   characters) normalizes to nil and is simply omitted from the request
+    #   -- never a rejection. Like purpose, it is a review-time record, never
+    #   an enforcement input.
     # @return [Hash] the issue response — "token" is the self-describing
     #   ag_ct_… connection token to hand to the user's agent
     # @raise [ArgumentError] if purpose exceeds 300 characters
     # @raise [IntrospectionError] if issuance fails
     #
-    def issue_token(user_id:, scopes:, role: nil, duration_seconds: UNSET, purpose: nil)
+    def issue_token(user_id:, scopes:, role: nil, duration_seconds: UNSET, purpose: nil,
+                    user_intent: nil)
       if purpose && purpose.length > PURPOSE_MAX_LENGTH
         raise ArgumentError, "purpose must be at most #{PURPOSE_MAX_LENGTH} characters"
+      end
+
+      # User-declared intent is metadata: anything outside the contract
+      # (non-String, empty after strip, over 300 characters) normalizes to
+      # nil rather than raising, per the cross-SDK parity convention.
+      unless user_intent.is_a?(String) && !user_intent.strip.empty? &&
+             user_intent.length <= USER_INTENT_MAX_LENGTH
+        user_intent = nil
       end
 
       body = { "user_id" => user_id, "scopes" => scopes }
       body["role"] = role if role
       body["purpose"] = purpose if purpose
+      body["user_intent"] = user_intent if user_intent
       # Tri-state: the UNSET sentinel omits the key entirely; nil survives
       # JSON.generate as explicit JSON null (no compact, no nil-guard).
       body["duration_seconds"] = duration_seconds unless duration_seconds.equal?(UNSET)
