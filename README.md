@@ -349,3 +349,22 @@ result.user_intent # => "Book my flights to the Austin offsite in October" or ni
 ```
 
 `user_intent` is nullable -- connections issued without one (or by servers that predate the field) read as `nil`. Months later, a review screen can answer "is this still appropriate?" with the user's own stated boundary, not just the app's. Like purpose, it is a review-time record and never an enforcement input; authorization decisions ride scopes, connection status, and consent.
+
+## App-Attested Presence
+
+If your app gates token minting behind its own embedded passkey/WebAuthn ceremony, AgentAdmit never witnesses that ceremony (it is origin-bound), so by default the hosted service reports `presence.verified: false` for those connections. Attest the ceremony fact at issuance to close that gap -- AFTER verifying and consuming your own fresh, purpose-bound attestation:
+
+```ruby
+issued = tokens.issue_token(
+  user_id: "user_42",
+  scopes: ["read:orders"],
+  presence: AgentAdmit::AppAttestedPresence.new(
+    method: "my_webauthn",             # lowercase alphanumeric/underscore
+    verified_at: attestation.created_at # Time or DateTime
+  )
+)
+```
+
+The SDK sends it as `presence: {verified: true, uv: true, method, verified_at}` -- `verified`/`uv` are literal true by construction and the class cannot represent anything else; a raw Hash is rejected so the wire contract stays owned by the typed class. The hosted service validates freshness (10-minute window, 60 s future clock-skew slack) and stores the method provenance-marked `app:<method>` so app-attested facts stay distinct from ceremonies AgentAdmit witnessed itself. Introspection, the grant-event ledger, and the evidence API then carry `presence.verified: true` for the connection.
+
+Honesty ceiling: this is your app's attestation, recorded and provenance-marked. It is not witnessed by AgentAdmit and not independently verifiable. Only attest a ceremony that verified the user with UV (biometric or PIN user verification); a ceremony without UV carries no presence fact, so pass `nil` (the default). An out-of-contract method (`^[a-z0-9_]+$`, 1-60) raises `ArgumentError` at construction, before any request; Ruby `Time`/`DateTime` always carry an offset, so `verified_at` serializes RFC 3339 with an explicit offset by construction.

@@ -54,14 +54,21 @@ module AgentAdmit
     #   user's typed words would be data loss. Empty/whitespace-only strings
     #   normalize to nil and are omitted. Like purpose, it is a review-time
     #   record, never an enforcement input.
+    # @param presence [AppAttestedPresence, nil] app-attested ceremony fact:
+    #   set it AFTER verifying and consuming your app's own fresh,
+    #   purpose-bound WebAuthn/passkey attestation for this mint. Forwarded
+    #   as presence {verified: true, uv: true, method, verified_at} and
+    #   stored provenance-marked "app:<method>"; omitted when nil (omitting
+    #   the field is the only way to say "no ceremony").
     # @return [Hash] the issue response — "token" is the self-describing
     #   ag_ct_… connection token to hand to the user's agent
-    # @raise [ArgumentError] if purpose exceeds 300 characters, or if
-    #   user_intent is a non-String (other than nil) or exceeds 300 characters
+    # @raise [ArgumentError] if purpose exceeds 300 characters, if
+    #   user_intent is a non-String (other than nil) or exceeds 300
+    #   characters, or if presence is neither nil nor an AppAttestedPresence
     # @raise [IntrospectionError] if issuance fails
     #
     def issue_token(user_id:, scopes:, role: nil, duration_seconds: UNSET, purpose: nil,
-                    user_intent: nil)
+                    user_intent: nil, presence: nil)
       if purpose && purpose.length > PURPOSE_MAX_LENGTH
         raise ArgumentError, "purpose must be at most #{PURPOSE_MAX_LENGTH} characters"
       end
@@ -77,10 +84,18 @@ module AgentAdmit
       end
       user_intent = nil if user_intent && user_intent.strip.empty?
 
+      # Presence is typed-only: a raw Hash is rejected so the wire contract
+      # (literal-true verified/uv, offset-carrying verified_at) stays owned
+      # by AppAttestedPresence, never hand-rolled at call sites.
+      unless presence.nil? || presence.is_a?(AppAttestedPresence)
+        raise ArgumentError, "presence must be an AgentAdmit::AppAttestedPresence or nil"
+      end
+
       body = { "user_id" => user_id, "scopes" => scopes }
       body["role"] = role if role
       body["purpose"] = purpose if purpose
       body["user_intent"] = user_intent if user_intent
+      body["presence"] = presence.to_wire if presence
       # Tri-state: the UNSET sentinel omits the key entirely; nil survives
       # JSON.generate as explicit JSON null (no compact, no nil-guard).
       body["duration_seconds"] = duration_seconds unless duration_seconds.equal?(UNSET)
