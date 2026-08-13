@@ -88,6 +88,7 @@ end
 
 require_relative "agentadmit/config"
 require_relative "agentadmit/introspection_client"
+require_relative "agentadmit/app_attested_presence"
 require_relative "agentadmit/tokens_client"
 require_relative "agentadmit/alerts_client"
 require_relative "agentadmit/webhook"
