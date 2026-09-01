@@ -381,19 +381,17 @@ class CallerConsentTelemetryTest < Minitest::Test
     ).merge(overrides)
   end
 
-  def test_required_scope_never_flows_into_verify_body
-    # scope_used is deliberately omitted on the consent path: the hosted
-    # refusal body carries no consent verdict, so a hosted scope refusal
-    # could never be consent-resolved. Scope stays local, after consent.
+  def test_required_scope_flows_with_consent_first_ordering
     requests = []
     mw, = build(ok_response(consented_body), requests, required_scope: "read:orders")
     status, = mw.call(agent_env)
 
     assert_equal 200, status
     body = sent_body(requests)
-    refute body.key?("scope_used"), "consent path must not declare scope pre-consent"
+    assert_equal "read:orders", body["scope_used"]
     assert_equal "/orders/42", body["endpoint"]
     assert_equal "GET", body["method"]
+    assert_equal true, body["consent_first"]
   end
 
   def test_local_step_up_still_enforced_after_consent
@@ -417,14 +415,12 @@ class CallerConsentTelemetryTest < Minitest::Test
     refute body.key?("scope_used")
     assert_equal "/orders/42", body["endpoint"]
     assert_equal "GET", body["method"]
+    assert_equal true, body["consent_first"]
   end
 
-  def test_hosted_scope_refusal_real_shape_fails_closed_without_leak
-    # The REAL hosted refusal body: {active, error, error_description,
-    # granted_scopes} -- no consent verdict, no user_id (verified against
-    # the hosted verify route). Unreachable from this middleware (it never
-    # sends scope_used), but the guard must fail closed with zero scope
-    # state disclosed to a caller class whose consent was never evaluated.
+  def test_hosted_scope_refusal_after_consent_fails_closed
+    # consent_first guarantees the hosted service can return this shape only
+    # after consent has been granted.
     requests = []
     body = { "active" => true,
              "error" => "insufficient_scope",
