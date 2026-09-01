@@ -368,3 +368,45 @@ issued = tokens.issue_token(
 The SDK sends it as `presence: {verified: true, uv: true, method, verified_at}` -- `verified`/`uv` are literal true by construction and the class cannot represent anything else; a raw Hash is rejected so the wire contract stays owned by the typed class. The hosted service validates freshness (10-minute window, 60 s future clock-skew slack) and stores the method provenance-marked `app:<method>` so app-attested facts stay distinct from ceremonies AgentAdmit witnessed itself. Introspection, the grant-event ledger, and the evidence API then carry `presence.verified: true` for the connection.
 
 Honesty ceiling: this is your app's attestation, recorded and provenance-marked. It is not witnessed by AgentAdmit and not independently verifiable. Only attest a ceremony that verified the user with UV (biometric or PIN user verification); a ceremony without UV carries no presence fact, so pass `nil` (the default). An out-of-contract method (`^[a-z0-9_]+$`, 1-60) raises `ArgumentError` at construction, before any request; Ruby `Time`/`DateTime` always carry an offset, so `verified_at` serializes RFC 3339 with an explicit offset by construction.
+
+## Per-Call Audit Telemetry
+
+Every verified call reports the exercised scope, endpoint, and method to your app's tamper-evident audit log on the hosted service. The introspection request body carries three optional fields alongside the token:
+
+- `scope_used` -- the single declared scope this call enforces (never a joined list)
+- `endpoint` -- the request path only; the query string is stripped before sending (queries can carry PII) and the path is truncated to 500 characters
+- `method` -- the HTTP method, uppercased, capped at 20 characters
+
+Each field is sent whenever it is known and OMITTED when it is not -- never null, never an empty string. When a field is omitted, the audit row honestly records "not reported".
+
+The Rack middleware always sends `endpoint` (from `PATH_INFO`) and `method`; declare the enforced scope at mount time to send `scope_used` too:
+
+```ruby
+# Scope resolved per request (env -> scope String or nil) ...
+use AgentAdmit::Middleware, scope_for: ->(env) { SCOPES[env["PATH_INFO"]] }
+# ... or one static scope for everything behind this middleware.
+use AgentAdmit::Middleware, scope_for: "read:orders"
+```
+
+`AgentAdmit::CallerConsent` mounted with `required_scope:` sends that scope automatically. Direct client calls pass the same optional keyword arguments:
+
+```ruby
+result = AgentAdmit::IntrospectionClient.new.verify(
+  token,
+  scope_used: "read:orders",
+  endpoint: request.path,
+  method: request.request_method
+)
+```
+
+The local `ScopeEnforcement` checks (`require_scope!`, `require_scope_if_agent!`) are unchanged -- defense in depth on top of the hosted decision.
+
+### Active-error responses are denials
+
+An introspection response with `active: true` AND a string `error` field means the token itself is valid but the authorization service refused this call. The SDK treats every such response as a denial, never a pass-through -- the downstream app does not run:
+
+- `insufficient_scope` -> `AgentAdmit::InsufficientScopeError`; middlewares return 403 with the step-up shape (`error`, `required_scope`, `granted_scopes`)
+- `bound_exceeded` -> `AgentAdmit::BoundExceededError`; middlewares return 403 passing the hosted fields (`error_description`, `bound`, `renewal`) through verbatim
+- any other error string -> `AgentAdmit::ActiveDenialError`; middlewares return 403 with `{error: <code>, error_description: "Call refused by the authorization service."}` -- unknown codes fail closed
+
+All three inherit from `AgentAdmit::ActiveDenialError` and expose `#code`, `#data` (the parsed hosted response), and `#denial_body` (the ready-made 403 JSON body) for apps that call `verify` directly.

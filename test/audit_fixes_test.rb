@@ -256,7 +256,7 @@ class MiddlewareBearerCaseTest < Minitest::Test
     inner_app = ->(env) { [200, {}, ["OK"]] }
     mw = AgentAdmit::Middleware.new(inner_app)
     fake_client = Object.new
-    fake_client.define_singleton_method(:verify) { |_token| STUB_RESULT }
+    fake_client.define_singleton_method(:verify) { |_token, **| STUB_RESULT }
     mw.instance_variable_set(:@client, fake_client)
     mw
   end

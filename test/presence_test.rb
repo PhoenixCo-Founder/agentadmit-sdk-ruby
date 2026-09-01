@@ -167,7 +167,7 @@ class MiddlewarePresenceEnvTest < Minitest::Test
     inner_app = ->(_env) { [200, {}, ["OK"]] }
     mw = AgentAdmit::Middleware.new(inner_app)
     fake_client = Object.new
-    fake_client.define_singleton_method(:verify) { |_token| result }
+    fake_client.define_singleton_method(:verify) { |_token, **| result }
     mw.instance_variable_set(:@client, fake_client)
     mw
   end
