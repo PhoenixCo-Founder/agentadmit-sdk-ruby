@@ -381,16 +381,31 @@ class CallerConsentTelemetryTest < Minitest::Test
     ).merge(overrides)
   end
 
-  def test_required_scope_flows_into_verify_body
+  def test_required_scope_never_flows_into_verify_body
+    # scope_used is deliberately omitted on the consent path: the hosted
+    # refusal body carries no consent verdict, so a hosted scope refusal
+    # could never be consent-resolved. Scope stays local, after consent.
     requests = []
     mw, = build(ok_response(consented_body), requests, required_scope: "read:orders")
     status, = mw.call(agent_env)
 
     assert_equal 200, status
     body = sent_body(requests)
-    assert_equal "read:orders", body["scope_used"]
+    refute body.key?("scope_used"), "consent path must not declare scope pre-consent"
     assert_equal "/orders/42", body["endpoint"]
     assert_equal "GET", body["method"]
+  end
+
+  def test_local_step_up_still_enforced_after_consent
+    requests = []
+    mw, app_calls = build(ok_response(consented_body), requests, required_scope: "write:orders")
+    status, _headers, resp = mw.call(agent_env)
+
+    assert_equal 403, status
+    parsed = parse(resp)
+    assert_equal "insufficient_scope", parsed["error"]
+    assert_equal "write:orders", parsed["required_scope"]
+    assert_empty app_calls
   end
 
   def test_no_required_scope_omits_scope_used
@@ -404,38 +419,25 @@ class CallerConsentTelemetryTest < Minitest::Test
     assert_equal "GET", body["method"]
   end
 
-  def test_hosted_insufficient_scope_with_granted_consent_is_step_up_403
+  def test_hosted_scope_refusal_real_shape_fails_closed_without_leak
+    # The REAL hosted refusal body: {active, error, error_description,
+    # granted_scopes} -- no consent verdict, no user_id (verified against
+    # the hosted verify route). Unreachable from this middleware (it never
+    # sends scope_used), but the guard must fail closed with zero scope
+    # state disclosed to a caller class whose consent was never evaluated.
     requests = []
-    body = consented_body("error" => "insufficient_scope", "scopes" => ["read:orders"])
+    body = { "active" => true,
+             "error" => "insufficient_scope",
+             "error_description" => 'Scope "write:orders" was not granted for this connection.',
+             "granted_scopes" => ["read:orders"] }
     mw, app_calls = build(ok_response(body), requests, required_scope: "write:orders")
     status, _headers, resp = mw.call(agent_env)
 
     assert_equal 403, status
     parsed = parse(resp)
     assert_equal "insufficient_scope", parsed["error"]
-    assert_equal "write:orders", parsed["required_scope"]
-    assert_equal ["read:orders"], parsed["granted_scopes"]
-    assert_empty app_calls
-  end
-
-  def test_hosted_insufficient_scope_with_denied_consent_stays_consent_first
-    # Patent FIG. 3 ordering survives the hosted refusal: a denied class
-    # must not learn scope state even when the hosted response says
-    # insufficient_scope.
-    requests = []
-    body = ok_verify_body(
-      "error" => "insufficient_scope",
-      "scopes" => ["read:orders"],
-      "consent" => { "caller_class" => "external_agent", "granted" => false, "source" => "setting" }
-    )
-    mw, app_calls = build(ok_response(body), requests, required_scope: "write:orders")
-    status, _headers, resp = mw.call(agent_env)
-
-    assert_equal 403, status
-    parsed = parse(resp)
-    assert_equal "consent_not_granted", parsed["error"]
-    refute parsed.key?("granted_scopes"), "denied class must not learn scope state"
-    refute parsed.key?("required_scope")
+    refute parsed.key?("granted_scopes"), "guard must not leak granted scopes"
+    refute parsed.key?("required_scope"), "guard must not leak required scope"
     assert_empty app_calls
   end
 

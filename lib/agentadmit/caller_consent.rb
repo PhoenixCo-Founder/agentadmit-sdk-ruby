@@ -134,20 +134,24 @@ module AgentAdmit
       token = (env["HTTP_AUTHORIZATION"] || "").sub(/\Abearer /i, "")
 
       begin
-        # The verify body carries the per-call audit telemetry: the scope
-        # this middleware enforces (when mounted with one), the request path
-        # (PATH_INFO -- no query string), and the uppercase method. Unknown
-        # fields are omitted.
+        # The verify body carries endpoint/method audit telemetry only.
+        # scope_used is deliberately NOT sent from this middleware: the
+        # hosted refusal body carries no consent verdict and no user_id, so
+        # a hosted scope refusal here could not be consent-resolved -- and
+        # consent must precede any scope disclosure (Patent FIG. 3). The
+        # scope check stays local, after the consent gate, exactly as the
+        # other AgentAdmit SDKs do.
         result = @client.verify(token,
-                                scope_used: @required_scope,
                                 endpoint: env["PATH_INFO"],
                                 method: env["REQUEST_METHOD"])
-      rescue InsufficientScopeError => e
-        # Hosted scope refusal on a valid token. Consent still precedes
-        # scope disclosure (Patent FIG. 3): resolve the class verdict from
-        # the hosted payload -- or the ledger, fail-closed -- BEFORE
-        # revealing any scope state.
-        return deny_insufficient_scope(e)
+      rescue InsufficientScopeError
+        # Unreachable when this middleware performs the verify (scope_used
+        # is never sent, so the hosted service cannot refuse on scope).
+        # Kept as a fail-closed guard that reveals no scope state to a
+        # caller class whose consent was never evaluated.
+        return [403, { "Content-Type" => "application/json" },
+                [{ error: "insufficient_scope",
+                   message: "Call refused by the authorization service." }.to_json]]
       rescue ActiveDenialError => e
         # Token valid, call refused (bound_exceeded or an unknown error
         # string on an active response). Fail closed: 403, app never runs.
@@ -224,21 +228,6 @@ module AgentAdmit
     # unresolvable class gets its consent response, never the step-up shape.
     # Only a consent-granted caller sees the 403 step-up body.
     #
-    def deny_insufficient_scope(error)
-      data = error.data.is_a?(Hash) ? error.data : {}
-      consent = data["consent"]
-      consent = nil unless consent.is_a?(Hash)
-
-      status, outcome = resolve_external_consent(consent, data["user_id"])
-      return outcome unless status == :granted
-
-      required = error.required_scope || @required_scope
-      [403, { "Content-Type" => "application/json" },
-       [{ error: "insufficient_scope",
-          required_scope: required,
-          granted_scopes: error.granted_scopes || [],
-          message: "This action requires '#{required}' scope." }.to_json]]
-    end
 
     ##
     # Token-less caller class (in_app_ai, or human_session under gate_human),

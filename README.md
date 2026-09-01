@@ -388,7 +388,7 @@ use AgentAdmit::Middleware, scope_for: ->(env) { SCOPES[env["PATH_INFO"]] }
 use AgentAdmit::Middleware, scope_for: "read:orders"
 ```
 
-`AgentAdmit::CallerConsent` mounted with `required_scope:` sends that scope automatically. Direct client calls pass the same optional keyword arguments:
+`AgentAdmit::CallerConsent` never sends `scope_used` (its consent gate precedes any scope disclosure; the scope check stays local, after consent) but still reports endpoint and method. Direct client calls pass the same optional keyword arguments:
 
 ```ruby
 result = AgentAdmit::IntrospectionClient.new.verify(
