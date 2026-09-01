@@ -91,7 +91,7 @@ module AgentAdmit
     # @raise [IntrospectionError] if the service is unreachable
     # @raise [RateLimitError] if rate-limited and retries exhausted
     #
-    def verify(token, scope_used: nil, endpoint: nil, method: nil)
+    def verify(token, scope_used: nil, endpoint: nil, method: nil, consent_first: false)
       unless token.start_with?(@config.token_prefix_access)
         raise InvalidTokenError, "Not an AgentAdmit access token"
       end
@@ -105,7 +105,8 @@ module AgentAdmit
 
       (0..max_retries).each do |attempt|
         request = build_request(uri, token, scope_used: scope_used,
-                                endpoint: endpoint, method: method)
+                                endpoint: endpoint, method: method,
+                                consent_first: consent_first)
 
         begin
           response = http.request(request)
@@ -371,7 +372,8 @@ module AgentAdmit
     # 20). Unknown fields are OMITTED, never sent as null or empty string --
     # the hosted audit row then honestly records "not reported".
     #
-    def build_request(uri, token, scope_used: nil, endpoint: nil, method: nil)
+    def build_request(uri, token, scope_used: nil, endpoint: nil, method: nil,
+                      consent_first: false)
       req = Net::HTTP::Post.new(uri.path)
       req["Authorization"] = "Bearer #{@config.api_key}"
       req["Content-Type"]  = "application/json"
@@ -383,6 +385,7 @@ module AgentAdmit
       body[:endpoint] = path if path
       verb = presence_of(method)
       body[:method] = verb.upcase[0, 20] if verb
+      body[:consent_first] = true if consent_first
 
       req.body = JSON.generate(body)
       req

@@ -134,21 +134,17 @@ module AgentAdmit
       token = (env["HTTP_AUTHORIZATION"] || "").sub(/\Abearer /i, "")
 
       begin
-        # The verify body carries endpoint/method audit telemetry only.
-        # scope_used is deliberately NOT sent from this middleware: the
-        # hosted refusal body carries no consent verdict and no user_id, so
-        # a hosted scope refusal here could not be consent-resolved -- and
-        # consent must precede any scope disclosure (Patent FIG. 3). The
-        # scope check stays local, after the consent gate, exactly as the
-        # other AgentAdmit SDKs do.
+        # Declare the exact exercised scope in the same hosted round trip.
+        # consent_first guarantees a denied caller class cannot learn scope
+        # state before this middleware returns its consent 403.
         result = @client.verify(token,
+                                scope_used: @required_scope,
                                 endpoint: env["PATH_INFO"],
-                                method: env["REQUEST_METHOD"])
+                                method: env["REQUEST_METHOD"],
+                                consent_first: true)
       rescue InsufficientScopeError
-        # Unreachable when this middleware performs the verify (scope_used
-        # is never sent, so the hosted service cannot refuse on scope).
-        # Kept as a fail-closed guard that reveals no scope state to a
-        # caller class whose consent was never evaluated.
+        # Hosted consent-first ordering guarantees this refusal is reachable
+        # only after consent was granted.
         return [403, { "Content-Type" => "application/json" },
                 [{ error: "insufficient_scope",
                    message: "Call refused by the authorization service." }.to_json]]
