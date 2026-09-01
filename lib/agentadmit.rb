@@ -20,7 +20,84 @@ module AgentAdmit
     end
   end
 
-  class InsufficientScopeError < Error; end
+  ##
+  # Raised when the hosted /verify returns `active: true` together with a
+  # string `error` field: the token itself is valid, but the authorization
+  # service refused THIS call. Always a denial, never a pass-through --
+  # middlewares map it to HTTP 403, and unknown error strings fail closed
+  # (forward compatible: an error code this SDK version has never heard of
+  # must never be treated as a pass).
+  #
+  # {#code} carries the machine-readable error string; {#data} carries the
+  # parsed hosted response so denial responses can pass hosted fields
+  # through; {#denial_body} is the ready-made 403 JSON body.
+  #
+  class ActiveDenialError < Error
+    # @return [String] machine-readable error code from the active response
+    attr_reader :code
+    # @return [Hash] the parsed hosted introspection response
+    attr_reader :data
+
+    def initialize(message = "Call refused by the authorization service.",
+                   code: "access_denied", data: {})
+      super(message)
+      @code = code
+      @data = data
+    end
+
+    # The HTTP 403 body for this denial. Unknown codes get the generic
+    # fail-closed shape; subclasses override with their contract shape.
+    # @return [Hash]
+    def denial_body
+      { "error" => code,
+        "error_description" => "Call refused by the authorization service." }
+    end
+  end
+
+  ##
+  # `active: true` + `error: "insufficient_scope"` -- token valid, the scope
+  # this call enforces not granted. {#denial_body} is the spec step-up shape
+  # (error, required_scope, granted_scopes).
+  #
+  class InsufficientScopeError < ActiveDenialError
+    # @return [String, nil] the scope the call enforced (hosted value when
+    #   present, else the scope_used this SDK sent)
+    attr_reader :required_scope
+    # @return [Array<String>, nil] granted scopes from the hosted response
+    attr_reader :granted_scopes
+
+    def initialize(message = "Scope not granted", required_scope: nil,
+                   granted_scopes: nil, data: {})
+      super(message, code: "insufficient_scope", data: data)
+      @required_scope = required_scope
+      @granted_scopes = granted_scopes
+    end
+
+    def denial_body
+      { "error" => "insufficient_scope",
+        "required_scope" => required_scope,
+        "granted_scopes" => granted_scopes || [] }
+    end
+  end
+
+  ##
+  # `active: true` + `error: "bound_exceeded"` -- the hosted bounded-
+  # capabilities layer refused the call. {#denial_body} passes the hosted
+  # fields (error_description, bound, renewal) through verbatim.
+  #
+  class BoundExceededError < ActiveDenialError
+    def initialize(message = "Call refused by the authorization service.", data: {})
+      super(message, code: "bound_exceeded", data: data)
+    end
+
+    def denial_body
+      body = { "error" => "bound_exceeded", "error_description" => message }
+      body["bound"]   = data["bound"]   if data.key?("bound")
+      body["renewal"] = data["renewal"] if data.key?("renewal")
+      body
+    end
+  end
+
   class IntrospectionError < Error; end
   class ConfigurationError < Error; end
 

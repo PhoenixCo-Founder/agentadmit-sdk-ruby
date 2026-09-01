@@ -71,13 +71,27 @@ module AgentAdmit
     # Automatically retries on HTTP 429 with exponential backoff + jitter.
     # Raises {RateLimitError} when retries are exhausted.
     #
+    # Per-call audit telemetry (all optional, all omitted from the request
+    # body when unknown -- never sent as null or empty string):
+    #
     # @param token [String] The full token including ag_at_ prefix
+    # @param scope_used [String, nil] the single scope this call enforces
+    #   (from the scope-enforcing integration point). Never a joined list;
+    #   omit for bare auth resolution / presence-only gates.
+    # @param endpoint [String, nil] inbound request path. Sent path-only:
+    #   the query string is stripped (queries can carry PII) and the path is
+    #   truncated to 500 characters.
+    # @param method [String, nil] inbound HTTP method; sent uppercased,
+    #   capped at 20 characters.
     # @return [IntrospectionResult]
     # @raise [InvalidTokenError] if validation fails
+    # @raise [ActiveDenialError] (incl. {InsufficientScopeError},
+    #   {BoundExceededError}) if the response is active but carries an error
+    #   string -- the service refused this call; always a denial
     # @raise [IntrospectionError] if the service is unreachable
     # @raise [RateLimitError] if rate-limited and retries exhausted
     #
-    def verify(token)
+    def verify(token, scope_used: nil, endpoint: nil, method: nil)
       unless token.start_with?(@config.token_prefix_access)
         raise InvalidTokenError, "Not an AgentAdmit access token"
       end
@@ -90,7 +104,8 @@ module AgentAdmit
       http = build_http(uri)
 
       (0..max_retries).each do |attempt|
-        request = build_request(uri, token)
+        request = build_request(uri, token, scope_used: scope_used,
+                                endpoint: endpoint, method: method)
 
         begin
           response = http.request(request)
@@ -165,10 +180,13 @@ module AgentAdmit
           raise InvalidTokenError.new("Token is not active: #{reason}", code: reason)
         end
 
-        # insufficient_scope arrives with active: true (token valid,
-        # requested scope not granted).
-        if data["error"] == "insufficient_scope"
-          raise InsufficientScopeError, data["error_description"] || "Scope not granted"
+        # Active-error fail-closed: `active: true` with a string `error`
+        # means the token is valid but the authorization service refused
+        # THIS call (insufficient_scope, bound_exceeded, or anything the
+        # service may add later). Every such response is a DENIAL, never a
+        # pass-through -- unknown error strings included.
+        if data["error"].is_a?(String) && !data["error"].empty?
+          raise_active_denial!(data, scope_used)
         end
 
         # Validate that consumed fields have the expected types when present.
@@ -310,12 +328,82 @@ module AgentAdmit
       http
     end
 
-    def build_request(uri, token)
+    ##
+    # Map an active-response error string to its typed denial (always raises).
+    #
+    #  - insufficient_scope: token valid, enforced scope not granted. Carries
+    #    the step-up fields: required_scope from the hosted response when
+    #    present, else the scope this call enforced; granted_scopes from the
+    #    hosted response when present.
+    #  - bound_exceeded: the hosted bounded-capabilities layer refused the
+    #    call; hosted fields ride along verbatim on the error's data.
+    #  - anything else: unknown refusal -> generic typed denial. Fail closed.
+    #
+    def raise_active_denial!(data, scope_used)
+      case data["error"]
+      when "insufficient_scope"
+        required = data["required_scope"].is_a?(String) ? data["required_scope"] : scope_used
+        granted  = data["granted_scopes"]
+        granted  = data["scopes"] unless granted.is_a?(Array)
+        granted  = nil unless granted.is_a?(Array)
+        raise InsufficientScopeError.new(
+          data["error_description"] || "Scope not granted",
+          required_scope: required, granted_scopes: granted, data: data
+        )
+      when "bound_exceeded"
+        raise BoundExceededError.new(
+          data["error_description"] || "Call refused by the authorization service.",
+          data: data
+        )
+      else
+        raise ActiveDenialError.new(
+          "Call refused by the authorization service.",
+          code: data["error"], data: data
+        )
+      end
+    end
+
+    ##
+    # Build the introspection POST. Beyond the token, the body carries the
+    # per-call audit telemetry when known: scope_used (the single scope this
+    # call enforces), endpoint (path only -- query stripped, queries can
+    # carry PII -- truncated to 500 chars), method (uppercase, capped at
+    # 20). Unknown fields are OMITTED, never sent as null or empty string --
+    # the hosted audit row then honestly records "not reported".
+    #
+    def build_request(uri, token, scope_used: nil, endpoint: nil, method: nil)
       req = Net::HTTP::Post.new(uri.path)
       req["Authorization"] = "Bearer #{@config.api_key}"
       req["Content-Type"]  = "application/json"
-      req.body = JSON.generate({ token: token })
+
+      body = { token: token }
+      scope = presence_of(scope_used)
+      body[:scope_used] = scope if scope
+      path = normalize_endpoint(endpoint)
+      body[:endpoint] = path if path
+      verb = presence_of(method)
+      body[:method] = verb.upcase[0, 20] if verb
+
+      req.body = JSON.generate(body)
       req
+    end
+
+    # The value when it is a non-empty String, else nil (field omitted).
+    def presence_of(value)
+      value.is_a?(String) && !value.empty? ? value : nil
+    end
+
+    # Path only: strip everything from the first "?" (query strings can
+    # carry PII) and cap at 500 characters. nil when nothing usable remains
+    # so the field is omitted, never null.
+    def normalize_endpoint(endpoint)
+      path = presence_of(endpoint)
+      return nil unless path
+
+      path = path.split("?", 2).first
+      return nil if path.nil? || path.empty?
+
+      path[0, 500]
     end
 
     ##
