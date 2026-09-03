@@ -3,6 +3,7 @@
 require "net/http"
 require "json"
 require "uri"
+require "digest"
 
 module AgentAdmit
   ##
@@ -15,9 +16,22 @@ module AgentAdmit
     # Hard cap on cumulative wait across all retries of a single verify call.
     MAX_RETRY_BUDGET_MS = 120_000
 
+    # Confirm-each-time (1.11.0). Request header an agent sets on its retry
+    # after the human completed the hosted confirmation ceremony, and the
+    # Rack env key Rack exposes it under.
+    ACTION_ATTESTATION_HEADER   = "X-AgentAdmit-Action-Attestation"
+    ACTION_ATTESTATION_RACK_KEY = "HTTP_X_AGENTADMIT_ACTION_ATTESTATION"
+
+    # Hosted BodySchema caps on the verify route for the confirm-each-time
+    # fields (endpoint <=500 and method <=20 are enforced elsewhere).
+    ATTESTATION_MAX = 120
+    DIGEST_MAX      = 128
+    SUMMARY_MAX     = 200
+
     IntrospectionResult = Struct.new(:user_id, :connection_id, :scopes, :agent_label,
                                      :sub, :role, :app_id, :jti, :exp, :consent,
-                                     :presence, :purpose, :user_intent, keyword_init: true) do
+                                     :presence, :purpose, :user_intent,
+                                     :action_confirmation, keyword_init: true) do
       def has_scope?(scope)
         scopes.include?(scope)
       end
@@ -58,6 +72,79 @@ module AgentAdmit
       # user_intent is the user's). Review-time record only, never an
       # enforcement input; authorization decisions ride scopes, connection
       # status, and consent.
+
+      # `action_confirmation` (Hash or nil) is the confirm-each-time
+      # attestation the hosted service CONSUMED to accept this call:
+      # {"action_session_id" => String, "consumed" => true}. Present only
+      # when a fresh human confirmation was spent on exactly this action, and
+      # only when the block is strictly typed -- anything else is dropped. An
+      # app that runs its own transaction step-up can treat this as that
+      # confirmation instead of asking the human twice.
+      def action_confirmed?
+        action_confirmation.is_a?(Hash) && action_confirmation["consumed"] == true
+      end
+    end
+
+    class << self
+      ##
+      # `sha256:<hex>` over the RAW request body bytes, so a confirmation
+      # covers the exact payload and not merely the route. nil for an empty
+      # or absent body (the field is then omitted, never sent as null).
+      #
+      # @param body [String, nil] raw request body bytes
+      # @return [String, nil]
+      #
+      def request_digest_for(body)
+        return nil unless body.is_a?(String) && !body.empty?
+
+        "sha256:#{Digest::SHA256.hexdigest(body)}"
+      end
+
+      ##
+      # A strictly-typed copy of the wire `confirmation` block, or nil when
+      # it is malformed. ids/urls/expiry/scope must be Strings; method,
+      # endpoint, request_digest and summary are nullable Strings (anything
+      # else reads as nil). Nothing outside the contract is copied through.
+      #
+      # @param raw [Object] the `confirmation` value from the hosted response
+      # @return [Hash, nil]
+      #
+      def parse_action_confirmation(raw)
+        return nil unless raw.is_a?(Hash)
+        return nil unless %w[action_session_id action_session_url expires_at scope]
+                          .all? { |key| raw[key].is_a?(String) }
+
+        nullable = ->(value) { value.is_a?(String) ? value : nil }
+        { "action_session_id"  => raw["action_session_id"],
+          "action_session_url" => raw["action_session_url"],
+          "expires_at"         => raw["expires_at"],
+          "scope"              => raw["scope"],
+          "method"             => nullable.call(raw["method"]),
+          "endpoint"           => nullable.call(raw["endpoint"]),
+          "request_digest"     => nullable.call(raw["request_digest"]),
+          "summary"            => nullable.call(raw["summary"]) }
+      end
+
+      ##
+      # The agent's X-AgentAdmit-Action-Attestation header from a Rack env:
+      # first value only, trimmed, capped at 120 characters. nil when absent
+      # or empty, so the field is omitted from the verify body.
+      #
+      # @param env [Hash] the Rack env
+      # @return [String, nil]
+      #
+      def action_attestation_from_env(env)
+        return nil unless env.is_a?(Hash)
+
+        raw = env[ACTION_ATTESTATION_RACK_KEY]
+        raw = raw.first if raw.is_a?(Array)
+        return nil unless raw.is_a?(String)
+
+        # Rack folds a repeated header into one comma-joined String; an
+        # attestation id is a single opaque value, so take the first.
+        value = raw.split(",").first.to_s.strip
+        value.empty? ? nil : value[0, ATTESTATION_MAX]
+      end
     end
 
     def initialize(config = nil)
@@ -83,15 +170,29 @@ module AgentAdmit
     #   truncated to 500 characters.
     # @param method [String, nil] inbound HTTP method; sent uppercased,
     #   capped at 20 characters.
+    # @param action_attestation_id [String, nil] confirm-each-time (1.11.0):
+    #   the single-use attestation id from a completed hosted ceremony, which
+    #   the agent presents on its retry via the
+    #   X-AgentAdmit-Action-Attestation header. Capped at 120 characters.
+    # @param request_digest [String, nil] `sha256:<hex>` over the raw request
+    #   body, so the confirmation covers the exact payload, not just the
+    #   route. Capped at 128 characters.
+    # @param action_summary [String, nil] the app's plain-language
+    #   description of THIS action, shown to the human on the hosted
+    #   confirmation page and committed into the signature. Trimmed and
+    #   capped at 200 characters. AgentAdmit does not verify the summary
+    #   against the request; it proves what the human was shown.
     # @return [IntrospectionResult]
     # @raise [InvalidTokenError] if validation fails
     # @raise [ActiveDenialError] (incl. {InsufficientScopeError},
-    #   {BoundExceededError}) if the response is active but carries an error
-    #   string -- the service refused this call; always a denial
+    #   {BoundExceededError}, {ConfirmationRequiredError}) if the response is
+    #   active but carries an error string -- the service refused this call;
+    #   always a denial
     # @raise [IntrospectionError] if the service is unreachable
     # @raise [RateLimitError] if rate-limited and retries exhausted
     #
-    def verify(token, scope_used: nil, endpoint: nil, method: nil, consent_first: false)
+    def verify(token, scope_used: nil, endpoint: nil, method: nil, consent_first: false,
+               action_attestation_id: nil, request_digest: nil, action_summary: nil)
       unless token.start_with?(@config.token_prefix_access)
         raise InvalidTokenError, "Not an AgentAdmit access token"
       end
@@ -106,7 +207,10 @@ module AgentAdmit
       (0..max_retries).each do |attempt|
         request = build_request(uri, token, scope_used: scope_used,
                                 endpoint: endpoint, method: method,
-                                consent_first: consent_first)
+                                consent_first: consent_first,
+                                action_attestation_id: action_attestation_id,
+                                request_digest: request_digest,
+                                action_summary: action_summary)
 
         begin
           response = http.request(request)
@@ -219,6 +323,20 @@ module AgentAdmit
         user_intent = data["user_intent"]
         user_intent = nil unless user_intent.is_a?(String)
 
+        # Confirm-each-time (1.11.0): the confirmation this accepted call
+        # SPENT. Strict -- a String session id and a literal boolean true
+        # consumed flag, or the block is dropped entirely. Surfacing a
+        # half-formed block would let an app skip its own step-up on a
+        # confirmation that was never actually consumed.
+        action_confirmation = data["action_confirmation"]
+        action_confirmation =
+          if action_confirmation.is_a?(Hash) &&
+             action_confirmation["action_session_id"].is_a?(String) &&
+             action_confirmation["consumed"] == true
+            { "action_session_id" => action_confirmation["action_session_id"],
+              "consumed" => true }
+          end
+
         return IntrospectionResult.new(
           user_id:      data["user_id"],
           connection_id: data["connection_id"],
@@ -232,7 +350,8 @@ module AgentAdmit
           consent:      consent,
           presence:     presence,
           purpose:      purpose,
-          user_intent:  user_intent
+          user_intent:  user_intent,
+          action_confirmation: action_confirmation
         )
       end
 
@@ -338,6 +457,11 @@ module AgentAdmit
     #    hosted response when present.
     #  - bound_exceeded: the hosted bounded-capabilities layer refused the
     #    call; hosted fields ride along verbatim on the error's data.
+    #  - confirmation_required: the scope IS granted but this call needs a
+    #    fresh human confirmation; the staged ceremony rides along, strictly
+    #    typed, so the agent can hand the link to the human. A malformed
+    #    ceremony block degrades to the generic denial -- fail closed rather
+    #    than relay an unusable confirmation.
     #  - anything else: unknown refusal -> generic typed denial. Fail closed.
     #
     def raise_active_denial!(data, scope_used)
@@ -356,6 +480,25 @@ module AgentAdmit
           data["error_description"] || "Call refused by the authorization service.",
           data: data
         )
+      when "confirmation_required"
+        confirmation = self.class.parse_action_confirmation(data["confirmation"])
+        if confirmation
+          description = data["error_description"]
+          description = ConfirmationRequiredError::DESCRIPTION unless
+            description.is_a?(String) && !description.empty?
+          status = data["attestation_status"]
+          raise ConfirmationRequiredError.new(
+            description,
+            confirmation: confirmation,
+            attestation_status: status.is_a?(String) ? status : nil,
+            data: data
+          )
+        end
+        # Malformed ceremony: fall through to the generic denial below.
+        raise ActiveDenialError.new(
+          "Call refused by the authorization service.",
+          code: "confirmation_required", data: data
+        )
       else
         raise ActiveDenialError.new(
           "Call refused by the authorization service.",
@@ -372,8 +515,13 @@ module AgentAdmit
     # 20). Unknown fields are OMITTED, never sent as null or empty string --
     # the hosted audit row then honestly records "not reported".
     #
+    # Confirm-each-time (1.11.0) adds three more optional fields under the
+    # same rule: action_attestation_id (<=120), request_digest (<=128) and
+    # action_summary (trimmed, <=200).
+    #
     def build_request(uri, token, scope_used: nil, endpoint: nil, method: nil,
-                      consent_first: false)
+                      consent_first: false, action_attestation_id: nil,
+                      request_digest: nil, action_summary: nil)
       req = Net::HTTP::Post.new(uri.path)
       req["Authorization"] = "Bearer #{@config.api_key}"
       req["Content-Type"]  = "application/json"
@@ -387,6 +535,13 @@ module AgentAdmit
       body[:method] = verb.upcase[0, 20] if verb
       body[:consent_first] = true if consent_first
 
+      attestation = trimmed_presence_of(action_attestation_id)
+      body[:action_attestation_id] = attestation[0, ATTESTATION_MAX] if attestation
+      digest = presence_of(request_digest)
+      body[:request_digest] = digest[0, DIGEST_MAX] if digest
+      summary = trimmed_presence_of(action_summary)
+      body[:action_summary] = summary[0, SUMMARY_MAX] if summary
+
       req.body = JSON.generate(body)
       req
     end
@@ -394,6 +549,12 @@ module AgentAdmit
     # The value when it is a non-empty String, else nil (field omitted).
     def presence_of(value)
       value.is_a?(String) && !value.empty? ? value : nil
+    end
+
+    # Same, after stripping surrounding whitespace (agent-supplied header
+    # values and app-supplied summaries both arrive padded).
+    def trimmed_presence_of(value)
+      presence_of(value.is_a?(String) ? value.strip : nil)
     end
 
     # Path only: strip everything from the first "?" (query strings can

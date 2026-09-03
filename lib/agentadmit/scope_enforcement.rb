@@ -87,6 +87,11 @@ module AgentAdmit
         connection_id: request.env["agentadmit.connection_id"],
         agent_label: request.env["agentadmit.agent_label"],
         presence: request.env["agentadmit.presence"],
+        # Confirm-each-time (1.11.0): the confirmation the hosted service
+        # spent to accept THIS call, or nil. An app running its own
+        # transaction step-up can treat a present block as that confirmation
+        # instead of asking the human twice.
+        action_confirmation: request.env["agentadmit.action_confirmation"],
       }
     end
   end
