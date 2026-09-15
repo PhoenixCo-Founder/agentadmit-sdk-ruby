@@ -98,6 +98,62 @@ module AgentAdmit
     end
   end
 
+  ##
+  # `active: true` + `error: "confirmation_required"` (SDK 1.11.0,
+  # confirm-each-time) -- the scope IS granted, but THIS call needs a fresh
+  # human confirmation before it may run. The hosted service has staged a
+  # one-time ceremony for exactly this action; {#confirmation} is the
+  # strictly-typed block describing it.
+  #
+  # The agent hands `confirmation["action_session_url"]` to the human. Only a
+  # user-verified passkey on that hosted page produces an attestation; the
+  # agent cannot complete the ceremony itself. The agent then retries the
+  # SAME request with the header
+  # `X-AgentAdmit-Action-Attestation: <action_session_id>`, which the SDK
+  # forwards as `action_attestation_id` on the next verify.
+  #
+  # {#attestation_status} explains why a presented attestation was NOT
+  # accepted, when one was presented (e.g. already_consumed, action_mismatch,
+  # expired, not_confirmed).
+  #
+  # A malformed confirmation block never reaches this class: the client falls
+  # back to a generic {ActiveDenialError} (fail closed, 403, no confirmation
+  # block) rather than relaying an unusable ceremony.
+  #
+  class ConfirmationRequiredError < ActiveDenialError
+    # The canonical agent-facing description. The hosted `error_description`
+    # wins when the service sends one.
+    DESCRIPTION = "This action requires a fresh human confirmation. " \
+                  "Give the confirmation link to the user, then retry with " \
+                  "the X-AgentAdmit-Action-Attestation header."
+
+    # @return [Hash] the strictly-typed staged ceremony: action_session_id,
+    #   action_session_url, expires_at, scope (Strings), and method, endpoint,
+    #   request_digest, summary (String or nil).
+    attr_reader :confirmation
+    # @return [String, nil] why a presented attestation was not accepted.
+    attr_reader :attestation_status
+
+    def initialize(message = DESCRIPTION, confirmation:, attestation_status: nil, data: {})
+      super(message, code: "confirmation_required", data: data)
+      @confirmation = confirmation
+      @attestation_status = attestation_status
+    end
+
+    # The 403 body: the refusal, the human-readable description, the staged
+    # ceremony, and the hosted attestation diagnostics when present. Nothing
+    # else from the wire -- a refusal must not leak identity or scope state.
+    def denial_body
+      body = { "error" => "confirmation_required",
+               "error_description" => message,
+               "confirmation" => confirmation }
+      %w[attestation_status attestation_description renewal].each do |field|
+        body[field] = data[field] if data[field].is_a?(String)
+      end
+      body
+    end
+  end
+
   class IntrospectionError < Error; end
   class ConfigurationError < Error; end
 

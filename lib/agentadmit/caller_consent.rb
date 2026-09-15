@@ -137,11 +137,17 @@ module AgentAdmit
         # Declare the exact exercised scope in the same hosted round trip.
         # consent_first guarantees a denied caller class cannot learn scope
         # state before this middleware returns its consent 403.
+        # The agent's confirm-each-time attestation (1.11.0) rides along
+        # whenever it is present, so a retry after a completed ceremony is
+        # accepted on this path too. This middleware declares no action
+        # summary, so it sends no request digest.
         result = @client.verify(token,
                                 scope_used: @required_scope,
                                 endpoint: env["PATH_INFO"],
                                 method: env["REQUEST_METHOD"],
-                                consent_first: true)
+                                consent_first: true,
+                                action_attestation_id:
+                                  IntrospectionClient.action_attestation_from_env(env))
       rescue InsufficientScopeError
         # Hosted consent-first ordering guarantees this refusal is reachable
         # only after consent was granted.
@@ -177,6 +183,9 @@ module AgentAdmit
       env["agentadmit.agent_label"] = result.agent_label
       env["agentadmit.presence"] = result.presence
       env["agentadmit.consent"] = consent
+      if result.action_confirmation
+        env["agentadmit.action_confirmation"] = result.action_confirmation
+      end
 
       @app.call(env)
     end

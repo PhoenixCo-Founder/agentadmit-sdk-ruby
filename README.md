@@ -144,6 +144,39 @@ end
 
 `require_presence!` fails closed: agents whose connection was minted without a completed ceremony get a 403 `presence_required`, and so do connections from servers that predate the feature. `presence_verified?` returns true only on an explicit boolean `verified: true`; absent or malformed presence data reads as not verified.
 
+## Confirm Each Time (Exercise-Time Human Confirmation)
+
+Some actions should never run on a standing grant alone: moving money,
+sending or publishing on the user's behalf, deleting data, or touching
+production. Mark those scopes `confirm_each_time: true` when you register
+them. Every call that exercises one then requires a fresh human confirmation.
+
+```ruby
+use AgentAdmit::Middleware,
+    scope_for: "write:payments",
+    action_summary: ->(env) { "Pay Alex $50" }
+```
+
+The first call is refused with HTTP 403 and a `confirmation_required` body.
+The agent gives `confirmation.action_session_url` to the human. After the
+human confirms on AgentAdmit's hosted page with their passkey, the agent
+retries the same request with
+`X-AgentAdmit-Action-Attestation: <action_session_id>`.
+
+The SDK always forwards that header. A configured summary also causes the
+middleware to send a `sha256:` digest of the raw Rack body and the summary,
+then rewinds `rack.input` for the application. The hosted signature commits to
+the scope, method, endpoint, digest, and the words shown to the human.
+AgentAdmit proves what was shown but does not verify the summary against the
+request.
+
+Custom gates receive a typed `AgentAdmit::ConfirmationRequiredError` carrying
+the strictly parsed ceremony. Malformed ceremony blocks remain generic
+fail-closed `ActiveDenialError` instances with no link. On an accepted retry,
+`result.action_confirmation` and `env["agentadmit.action_confirmation"]`
+expose the consumed ceremony so your own transaction step-up can avoid asking
+the human twice.
+
 ## Rate Limiting
 
 The AgentAdmit introspection endpoint enforces rate limits. The Ruby SDK handles HTTP 429 responses **automatically** with exponential backoff and jitter -- no changes needed in your middleware code.
@@ -409,6 +442,7 @@ An introspection response with `active: true` AND a string `error` field means t
 
 - `insufficient_scope` -> `AgentAdmit::InsufficientScopeError`; middlewares return 403 with the step-up shape (`error`, `required_scope`, `granted_scopes`)
 - `bound_exceeded` -> `AgentAdmit::BoundExceededError`; middlewares return 403 passing the hosted fields (`error_description`, `bound`, `renewal`) through verbatim
+- `confirmation_required` -> `AgentAdmit::ConfirmationRequiredError`; middlewares return 403 with the strictly typed `confirmation` block (`action_session_id`, `action_session_url`, `expires_at`, `scope`, ...) plus `attestation_status`/`attestation_description`/`renewal` when the hosted service sent them, so the agent can relay the confirmation link to the human (see [Confirm Each Time](#confirm-each-time-exercise-time-human-confirmation)); a malformed `confirmation` block degrades to the generic `ActiveDenialError` shape with no link
 - any other error string -> `AgentAdmit::ActiveDenialError`; middlewares return 403 with `{error: <code>, error_description: "Call refused by the authorization service."}` -- unknown codes fail closed
 
-All three inherit from `AgentAdmit::ActiveDenialError` and expose `#code`, `#data` (the parsed hosted response), and `#denial_body` (the ready-made 403 JSON body) for apps that call `verify` directly.
+All four inherit from `AgentAdmit::ActiveDenialError` and expose `#code`, `#data` (the parsed hosted response), and `#denial_body` (the ready-made 403 JSON body) for apps that call `verify` directly.
