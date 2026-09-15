@@ -442,6 +442,7 @@ An introspection response with `active: true` AND a string `error` field means t
 
 - `insufficient_scope` -> `AgentAdmit::InsufficientScopeError`; middlewares return 403 with the step-up shape (`error`, `required_scope`, `granted_scopes`)
 - `bound_exceeded` -> `AgentAdmit::BoundExceededError`; middlewares return 403 passing the hosted fields (`error_description`, `bound`, `renewal`) through verbatim
+- `confirmation_required` -> `AgentAdmit::ConfirmationRequiredError`; middlewares return 403 with the strictly typed `confirmation` block (`action_session_id`, `action_session_url`, `expires_at`, `scope`, ...) plus `attestation_status`/`attestation_description`/`renewal` when the hosted service sent them, so the agent can relay the confirmation link to the human (see [Confirm Each Time](#confirm-each-time-exercise-time-human-confirmation)); a malformed `confirmation` block degrades to the generic `ActiveDenialError` shape with no link
 - any other error string -> `AgentAdmit::ActiveDenialError`; middlewares return 403 with `{error: <code>, error_description: "Call refused by the authorization service."}` -- unknown codes fail closed
 
-All three inherit from `AgentAdmit::ActiveDenialError` and expose `#code`, `#data` (the parsed hosted response), and `#denial_body` (the ready-made 403 JSON body) for apps that call `verify` directly.
+All four inherit from `AgentAdmit::ActiveDenialError` and expose `#code`, `#data` (the parsed hosted response), and `#denial_body` (the ready-made 403 JSON body) for apps that call `verify` directly.

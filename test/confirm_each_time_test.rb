@@ -220,3 +220,67 @@ class ConfirmEachTimeVerifyUrlTest < Minitest::Test
     end
   end
 end
+
+class ConfirmEachTimeCallerConsentTest < Minitest::Test
+  include ConfirmEachTimeHelpers
+
+  def consent_body(extra = {})
+    active("scopes" => ["write:payments"],
+           "consent" => { "caller_class" => "external_agent", "granted" => true,
+                          "source" => "app_default", "evaluated_at" => "x" }).merge(extra)
+  end
+
+  def build(body, requests)
+    app_calls = []
+    app = lambda do |env|
+      app_calls << env["agentadmit.action_confirmation"]
+      [200, {}, ["ok"]]
+    end
+    middleware = AgentAdmit::CallerConsent.new(app, required_scope: "write:payments")
+    middleware.instance_variable_set(:@client, client_for(body, requests))
+    [middleware, app_calls]
+  end
+
+  def env
+    { "HTTP_AUTHORIZATION" => "Bearer ag_at_dummy",
+      "HTTP_X_AGENTADMIT_ACTION_ATTESTATION" => "asess_abc",
+      "PATH_INFO" => "/api/payments", "REQUEST_METHOD" => "POST",
+      "rack.input" => StringIO.new('{"amount":50}') }
+  end
+
+  def test_consent_path_relays_confirmation_link_and_never_runs_the_app
+    requests = []
+    middleware, app_calls = build(
+      consent_body("error" => "confirmation_required", "confirmation" => confirmation,
+                   "attestation_status" => "expired"),
+      requests
+    )
+    status, _headers, chunks = middleware.call(env)
+    body = JSON.parse(chunks.first)
+
+    assert_equal 403, status
+    assert_equal "confirmation_required", body["error"]
+    assert_equal confirmation["action_session_url"], body.dig("confirmation", "action_session_url")
+    assert_equal confirmation["expires_at"], body.dig("confirmation", "expires_at")
+    assert_equal "expired", body["attestation_status"]
+    assert_empty app_calls
+  end
+
+  def test_consent_path_forwards_attestation_without_digest_and_exposes_consumed_ceremony
+    requests = []
+    middleware, app_calls = build(
+      consent_body("action_confirmation" =>
+        { "action_session_id" => "asess_abc", "consumed" => true }),
+      requests
+    )
+    status, = middleware.call(env)
+    sent = JSON.parse(requests.first.body)
+
+    assert_equal 200, status
+    assert_equal "asess_abc", sent["action_attestation_id"]
+    assert_equal true, sent["consent_first"]
+    refute sent.key?("request_digest")
+    refute sent.key?("action_summary")
+    assert_equal({ "action_session_id" => "asess_abc", "consumed" => true }, app_calls.first)
+  end
+end
