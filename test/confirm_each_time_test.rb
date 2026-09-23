@@ -68,6 +68,61 @@ class ConfirmEachTimeClientTest < Minitest::Test
     refute error.denial_body.key?("secret")
   end
 
+  def declined
+    { "action_session_id" => "asess_abc", "declined_at" => "2026-09-22T21:35:42Z",
+      "hold_until" => "2026-09-22T21:50:42Z", "scope" => "write:payments",
+      "method" => "POST", "endpoint" => "/api/payments",
+      "request_digest" => "sha256:deadbeef", "summary" => "Pay Alex $50" }
+  end
+
+  def test_typed_decline_carries_strict_block_and_hold_without_wire_leaks
+    body = active("error" => "confirmation_declined", "declined" => declined,
+                  "error_description" => "The user declined this action on the hosted confirmation page. Do not retry it unless the user asks you to; no new confirmation can be staged for this action until 2026-09-22T21:50:42Z.",
+                  "attestation_status" => "declined",
+                  "attestation_description" => "The user declined this action.",
+                  "renewal" => "Only the user can lift a decline.", "secret" => "no")
+    error = assert_raises(AgentAdmit::ConfirmationDeclinedError) do
+      client_for(body).verify("ag_at_dummy", scope_used: "write:payments")
+    end
+
+    assert_kind_of AgentAdmit::ActiveDenialError, error
+    refute_kind_of AgentAdmit::ConfirmationRequiredError, error
+    assert_equal declined, error.declined
+    assert_equal "declined", error.attestation_status
+    assert_equal "confirmation_declined", error.denial_body["error"]
+    assert_equal declined, error.denial_body["declined"]
+    assert_includes error.denial_body["error_description"], "Do not retry"
+    assert_equal "Only the user can lift a decline.", error.denial_body["renewal"]
+    refute error.denial_body.key?("confirmation")
+    refute error.denial_body.key?("secret")
+  end
+
+  def test_decline_without_description_uses_the_default
+    error = assert_raises(AgentAdmit::ConfirmationDeclinedError) do
+      client_for(active("error" => "confirmation_declined", "declined" => declined)).verify("ag_at_dummy")
+    end
+    assert_includes error.denial_body["error_description"], "unless the user asks"
+    assert_nil error.attestation_status
+  end
+
+  def test_malformed_decline_is_a_plain_fail_closed_denial
+    body = active("error" => "confirmation_declined",
+                  "declined" => { "action_session_id" => "asess_abc", "hold_until" => 7 })
+    error = assert_raises(AgentAdmit::ActiveDenialError) do
+      client_for(body).verify("ag_at_dummy")
+    end
+    refute_kind_of AgentAdmit::ConfirmationDeclinedError, error
+    assert_equal "confirmation_declined", error.denial_body["error"]
+    refute error.denial_body.key?("declined")
+    assert_nil AgentAdmit::IntrospectionClient.parse_action_decline("nope")
+    assert_nil AgentAdmit::IntrospectionClient.parse_action_decline("action_session_id" => "a", "declined_at" => "d", "scope" => "s")
+    parsed = AgentAdmit::IntrospectionClient.parse_action_decline(
+      "action_session_id" => "a", "declined_at" => "d", "hold_until" => "h", "scope" => "s", "method" => 4
+    )
+    assert_equal "h", parsed["hold_until"]
+    assert_nil parsed["method"]
+  end
+
   def test_malformed_ceremony_is_a_plain_fail_closed_denial
     body = active("error" => "confirmation_required",
                   "confirmation" => { "action_session_id" => 17 })
