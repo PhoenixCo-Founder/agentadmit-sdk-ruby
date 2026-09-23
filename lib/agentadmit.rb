@@ -154,6 +154,58 @@ module AgentAdmit
     end
   end
 
+  ##
+  # `active: true` + `error: "confirmation_declined"` (SDK 1.12.0,
+  # confirm-each-time) -- the user declined exactly this action on the hosted
+  # confirmation page, and the hosted service holds that answer until
+  # `declined["hold_until"]`. No new ceremony is staged and the user is not
+  # notified again while the hold runs. {#declined} is the strictly-typed
+  # block naming the declined session, when, how long, and the exact action.
+  #
+  # Agents should relay the decline to the user and not retry unless the user
+  # asks; only the user can lift a decline. After the hold ends, a retry
+  # stages a fresh confirmation.
+  #
+  # {#attestation_status} explains why a presented attestation was NOT
+  # accepted, when one was presented (e.g. declined).
+  #
+  # A malformed declined block never reaches this class: the client falls
+  # back to a generic {ActiveDenialError} (fail closed, 403, no declined
+  # block).
+  #
+  class ConfirmationDeclinedError < ActiveDenialError
+    # The canonical agent-facing description. The hosted `error_description`
+    # wins when the service sends one.
+    DESCRIPTION = "The user declined this action on the hosted confirmation page. " \
+                  "Do not retry it unless the user asks you to."
+
+    # @return [Hash] the strictly-typed decline: action_session_id,
+    #   declined_at, hold_until, scope (Strings), and method, endpoint,
+    #   request_digest, summary (String or nil).
+    attr_reader :declined
+    # @return [String, nil] why a presented attestation was not accepted.
+    attr_reader :attestation_status
+
+    def initialize(message = DESCRIPTION, declined:, attestation_status: nil, data: {})
+      super(message, code: "confirmation_declined", data: data)
+      @declined = declined
+      @attestation_status = attestation_status
+    end
+
+    # The 403 body: the refusal, the human-readable description, the decline,
+    # and the hosted attestation diagnostics when present. Nothing else from
+    # the wire -- a refusal must not leak identity or scope state.
+    def denial_body
+      body = { "error" => "confirmation_declined",
+               "error_description" => message,
+               "declined" => declined }
+      %w[attestation_status attestation_description renewal].each do |field|
+        body[field] = data[field] if data[field].is_a?(String)
+      end
+      body
+    end
+  end
+
   class IntrospectionError < Error; end
   class ConfigurationError < Error; end
 

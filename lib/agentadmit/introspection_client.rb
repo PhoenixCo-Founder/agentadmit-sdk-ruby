@@ -126,6 +126,32 @@ module AgentAdmit
       end
 
       ##
+      # A strictly-typed copy of the wire `declined` block (SDK 1.12.0), or
+      # nil when it is malformed. action_session_id, declined_at, hold_until
+      # and scope must be Strings; method, endpoint, request_digest and
+      # summary are nullable Strings (anything else reads as nil). Nothing
+      # outside the contract is copied through.
+      #
+      # @param raw [Object] the `declined` value from the hosted response
+      # @return [Hash, nil]
+      #
+      def parse_action_decline(raw)
+        return nil unless raw.is_a?(Hash)
+        return nil unless %w[action_session_id declined_at hold_until scope]
+                          .all? { |key| raw[key].is_a?(String) }
+
+        nullable = ->(value) { value.is_a?(String) ? value : nil }
+        { "action_session_id" => raw["action_session_id"],
+          "declined_at"       => raw["declined_at"],
+          "hold_until"        => raw["hold_until"],
+          "scope"             => raw["scope"],
+          "method"            => nullable.call(raw["method"]),
+          "endpoint"          => nullable.call(raw["endpoint"]),
+          "request_digest"    => nullable.call(raw["request_digest"]),
+          "summary"           => nullable.call(raw["summary"]) }
+      end
+
+      ##
       # The agent's X-AgentAdmit-Action-Attestation header from a Rack env:
       # first value only, trimmed, capped at 120 characters. nil when absent
       # or empty, so the field is omitted from the verify body.
@@ -462,6 +488,10 @@ module AgentAdmit
     #    typed, so the agent can hand the link to the human. A malformed
     #    ceremony block degrades to the generic denial -- fail closed rather
     #    than relay an unusable confirmation.
+    #  - confirmation_declined: the user declined this exact action on the
+    #    hosted page; the hold rides along, strictly typed, so the agent can
+    #    relay the decline to the user. A malformed block degrades to the
+    #    generic denial.
     #  - anything else: unknown refusal -> generic typed denial. Fail closed.
     #
     def raise_active_denial!(data, scope_used)
@@ -498,6 +528,28 @@ module AgentAdmit
         raise ActiveDenialError.new(
           "Call refused by the authorization service.",
           code: "confirmation_required", data: data
+        )
+      when "confirmation_declined"
+        # SDK 1.12.0: the user declined exactly this action on the hosted
+        # page and the hold still runs. Relay the decline so the agent can
+        # tell the user instead of nagging with a link.
+        declined = self.class.parse_action_decline(data["declined"])
+        if declined
+          description = data["error_description"]
+          description = ConfirmationDeclinedError::DESCRIPTION unless
+            description.is_a?(String) && !description.empty?
+          status = data["attestation_status"]
+          raise ConfirmationDeclinedError.new(
+            description,
+            declined: declined,
+            attestation_status: status.is_a?(String) ? status : nil,
+            data: data
+          )
+        end
+        # Malformed decline: generic denial, fail closed, no block.
+        raise ActiveDenialError.new(
+          "Call refused by the authorization service.",
+          code: "confirmation_declined", data: data
         )
       else
         raise ActiveDenialError.new(
