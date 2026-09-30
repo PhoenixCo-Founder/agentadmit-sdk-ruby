@@ -449,6 +449,77 @@ result = AgentAdmit::IntrospectionClient.new.verify(
 
 The local `ScopeEnforcement` checks (`require_scope!`, `require_scope_if_agent!`) are unchanged -- defense in depth on top of the hosted decision.
 
+### Outcome reporting
+
+Successful verify responses may include `result.audit_row_id`, the hosted
+audit row id for that call. After your handler runs, you can append what your
+app observed:
+
+```ruby
+client = AgentAdmit::IntrospectionClient.new
+result = client.verify(token, scope_used: "write:payments",
+                       endpoint: request.path, method: request.request_method)
+
+begin
+  # run the app action
+  client.report_outcome(result.audit_row_id,
+                        outcome: "executed",
+                        status_class: "2xx") if result.audit_row_id
+rescue
+  client.report_outcome(result.audit_row_id,
+                        outcome: "failed",
+                        status_class: "5xx") if result.audit_row_id
+  raise
+end
+```
+
+`outcome` must be `"executed"`, `"failed"`, or `"unknown"`. `unknown` is
+only for an explicit "we cannot truthfully classify this" case; it is never
+chosen automatically. `status_class` may be `"1xx"` through `"5xx"` or `nil`.
+Outcome rows report what the app observed after verification; they are not
+independent proof of execution.
+
+Rack middleware can do the common status mapping for you:
+
+```ruby
+use AgentAdmit::Middleware,
+    scope_for: "write:payments",
+    action_summary: ->(env) { "Pay Alex $50" },
+    report_outcome: true
+```
+
+With `report_outcome: true`, the middleware reports only after the downstream
+Rack app returns a response triple and the status has an observable class.
+Statuses below 400 report `"executed"`; statuses 400 and above report
+`"failed"`. If the app raises, aborts before returning a triple, returns no
+observable status, or verify did not include `audit_row_id`, the middleware
+does not guess. Reporting errors are logged and never replace the app's
+response.
+
+For downstream code, the Rack env includes `env["agentadmit.audit_row_id"]`
+when the hosted service returned one.
+
+### Replay receipts
+
+When an agent retries with an already-consumed confirm-each-time attestation,
+verify may return `result.consumed_receipt`. It is a diagnostic receipt for
+the earlier consumption event:
+
+```ruby
+result.consumed_receipt
+# => {
+#      "consumed_at" => "2026-09-30T02:54:07.000Z",
+#      "connection_id" => "conn_123",
+#      "chain_seq" => nil,
+#      "row_hash" => nil
+#    }
+```
+
+This is not a fresh authorization and must not be treated as permission to
+run the action. It exists so agents and apps can explain an
+`already_consumed` replay without staging another confirmation. Rack exposes
+the typed block at `env["agentadmit.consumed_receipt"]` when present.
+
 ### Active-error responses are denials
 
 An introspection response with `active: true` AND a string `error` field means the token itself is valid but the authorization service refused this call. The SDK treats every such response as a denial, never a pass-through -- the downstream app does not run:

@@ -12,6 +12,10 @@ module AgentAdmit
   #   env['agentadmit.connection_id'] -- connection identifier
   #   env['agentadmit.agent_label']   -- agent display name
   #   env['agentadmit.presence']      -- human-presence block (Hash) or nil
+  #   env['agentadmit.audit_row_id']  -- hosted audit row id for this verify
+  #   env['agentadmit.consumed_receipt']
+  #                                   -- replay diagnostic for an already-
+  #                                      consumed confirmation, or nil
   #   env['agentadmit.action_confirmation']
   #                                   -- {"action_session_id" =>, "consumed" => true}
   #                                      when a confirm-each-time confirmation
@@ -66,16 +70,25 @@ module AgentAdmit
     #   request-body digest for this middleware. AgentAdmit does not verify
     #   the summary against the request; it proves what the human was shown.
     #
-    def initialize(app, scope_for: nil, action_summary: nil, &action_summary_block)
+    # @param report_outcome [Boolean] when true, reports the downstream
+    #   Rack response status class to AgentAdmit after the app returns a
+    #   response triple. Reporting is skipped when the app raises, returns no
+    #   observable Rack triple, or has no audit_row_id. Reporting failures are
+    #   logged and never replace the app's response.
+    #
+    def initialize(app, scope_for: nil, action_summary: nil, report_outcome: false,
+                   &action_summary_block)
       @app = app
       @client = IntrospectionClient.new
       @config = AgentAdmit.configuration || Config.new
       @scope_for = scope_for
       @action_summary = action_summary || action_summary_block
+      @report_outcome = report_outcome
     end
 
     def call(env)
       auth = env["HTTP_AUTHORIZATION"] || ""
+      result = nil
 
       if BEARER_AGENT_RE.match?(auth)
         # Strip the scheme prefix (case-insensitively) to get the bare token.
@@ -96,6 +109,8 @@ module AgentAdmit
           env["agentadmit.connection_id"] = result.connection_id
           env["agentadmit.agent_label"] = result.agent_label
           env["agentadmit.presence"] = result.presence
+          env["agentadmit.audit_row_id"] = result.audit_row_id
+          env["agentadmit.consumed_receipt"] = result.consumed_receipt if result.consumed_receipt
           # Only set when the hosted service actually SPENT a confirmation on
           # this call; the key stays absent otherwise, so `env.key?` is a
           # truthful test.
@@ -116,7 +131,9 @@ module AgentAdmit
         end
       end
 
-      @app.call(env)
+      response = @app.call(env)
+      report_outcome_after_response(result, response) if @report_outcome && result
+      response
     end
 
     private
@@ -167,6 +184,21 @@ module AgentAdmit
       IntrospectionClient.request_digest_for(raw)
     rescue StandardError
       nil
+    end
+
+    def report_outcome_after_response(result, response)
+      return unless result.audit_row_id
+      return unless response.is_a?(Array) && response.length >= 3
+
+      status_class = IntrospectionClient.status_class_for(response[0])
+      outcome = IntrospectionClient.outcome_for_status(response[0])
+      return unless status_class && outcome
+
+      @client.report_outcome(result.audit_row_id,
+                             outcome: outcome,
+                             status_class: status_class)
+    rescue StandardError => e
+      warn "[AgentAdmit] Outcome report failed: #{e.message}"
     end
   end
 end

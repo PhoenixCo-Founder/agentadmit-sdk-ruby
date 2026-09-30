@@ -27,11 +27,14 @@ module AgentAdmit
     ATTESTATION_MAX = 120
     DIGEST_MAX      = 128
     SUMMARY_MAX     = 200
+    OUTCOMES        = %w[executed failed unknown].freeze
+    STATUS_CLASSES  = %w[1xx 2xx 3xx 4xx 5xx].freeze
 
     IntrospectionResult = Struct.new(:user_id, :connection_id, :scopes, :agent_label,
                                      :sub, :role, :app_id, :jti, :exp, :consent,
                                      :presence, :purpose, :user_intent,
-                                     :action_confirmation, keyword_init: true) do
+                                     :action_confirmation, :audit_row_id,
+                                     :consumed_receipt, keyword_init: true) do
       def has_scope?(scope)
         scopes.include?(scope)
       end
@@ -83,9 +86,30 @@ module AgentAdmit
       def action_confirmed?
         action_confirmation.is_a?(Hash) && action_confirmation["consumed"] == true
       end
+
+      # `audit_row_id` (String or nil) identifies the hosted audit row for
+      # this successful verify call. Use it with #report_outcome after the
+      # application observes whether its handler executed or failed.
+
+      # `consumed_receipt` (Hash or nil) is a replay diagnostic for an
+      # already-consumed confirm-each-time attestation. It is not a fresh
+      # authorization and must not be treated as permission to run.
     end
 
     class << self
+      def status_class_for(status)
+        code = Integer(status) rescue nil
+        return nil unless code && (100..599).cover?(code)
+
+        "#{code / 100}xx"
+      end
+
+      def outcome_for_status(status)
+        status_class_for(status) ? (Integer(status) < 400 ? "executed" : "failed") : nil
+      rescue ArgumentError, TypeError
+        nil
+      end
+
       ##
       # `sha256:<hex>` over the RAW request body bytes, so a confirmation
       # covers the exact payload and not merely the route. nil for an empty
@@ -149,6 +173,23 @@ module AgentAdmit
           "endpoint"          => nullable.call(raw["endpoint"]),
           "request_digest"    => nullable.call(raw["request_digest"]),
           "summary"           => nullable.call(raw["summary"]) }
+      end
+
+      ##
+      # A strictly-typed replay diagnostic for an already-consumed action
+      # attestation, or nil when the block is absent/malformed. This is a
+      # receipt for an earlier consumption event, not authorization for this
+      # call.
+      #
+      def parse_consumed_receipt(raw)
+        return nil unless raw.is_a?(Hash)
+        return nil unless raw["consumed_at"].is_a?(String)
+        return nil unless raw["connection_id"].is_a?(String)
+
+        { "consumed_at"   => raw["consumed_at"],
+          "connection_id" => raw["connection_id"],
+          "chain_seq"     => raw["chain_seq"].is_a?(Integer) ? raw["chain_seq"] : nil,
+          "row_hash"      => raw["row_hash"].is_a?(String) ? raw["row_hash"] : nil }
       end
 
       ##
@@ -363,6 +404,10 @@ module AgentAdmit
               "consumed" => true }
           end
 
+        audit_row_id = data["audit_row_id"]
+        audit_row_id = nil unless audit_row_id.is_a?(String)
+        consumed_receipt = self.class.parse_consumed_receipt(data["consumed_receipt"])
+
         return IntrospectionResult.new(
           user_id:      data["user_id"],
           connection_id: data["connection_id"],
@@ -377,12 +422,68 @@ module AgentAdmit
           presence:     presence,
           purpose:      purpose,
           user_intent:  user_intent,
-          action_confirmation: action_confirmation
+          action_confirmation: action_confirmation,
+          audit_row_id: audit_row_id,
+          consumed_receipt: consumed_receipt
         )
       end
 
       # Should never be reached
       raise IntrospectionError, "Unexpected exit from retry loop"
+    end
+
+    ##
+    # Report what the application observed after a successful verify call.
+    #
+    # This appends an outcome row to the hosted tamper-evident audit chain.
+    # It reports the app's observed result; it is not independent proof of
+    # execution. Use outcome: "unknown" only when you explicitly cannot
+    # classify the result.
+    #
+    # @param audit_row_id [String] result.audit_row_id from #verify
+    # @param outcome [String] "executed" | "failed" | "unknown"
+    # @param status_class [String, nil] "1xx".."5xx" or nil
+    # @return [Hash] parsed hosted outcome response
+    # @raise [ArgumentError] invalid arguments
+    # @raise [IntrospectionError] hosted service unreachable or rejected the report
+    #
+    def report_outcome(audit_row_id, outcome:, status_class: nil)
+      unless audit_row_id.is_a?(String) && !audit_row_id.empty?
+        raise ArgumentError, "audit_row_id is required"
+      end
+      unless OUTCOMES.include?(outcome)
+        raise ArgumentError, "outcome must be executed, failed, or unknown"
+      end
+      unless status_class.nil? || STATUS_CLASSES.include?(status_class)
+        raise ArgumentError, "status_class must be 1xx, 2xx, 3xx, 4xx, 5xx, or nil"
+      end
+
+      origin = @config.api_url.sub(%r{/\z}, "")
+      uri = URI.parse("#{origin}/api/v1/audit/#{audit_row_id}/outcome")
+      http = build_http(uri)
+
+      request = Net::HTTP::Post.new(uri.path)
+      request["Authorization"] = "Bearer #{@config.api_key}"
+      request["Content-Type"]  = "application/json"
+      request.body = JSON.generate(outcome: outcome, status_class: status_class)
+
+      response = begin
+        http.request(request)
+      rescue StandardError => e
+        raise IntrospectionError, "Outcome report failed: #{e.message}"
+      end
+
+      unless (200..299).cover?(response.code.to_i)
+        data = JSON.parse(response.body) rescue {}
+        raise IntrospectionError,
+              data["error_description"] || data["error"] || "Outcome report returned #{response.code}"
+      end
+
+      begin
+        JSON.parse(response.body)
+      rescue JSON::ParserError
+        raise IntrospectionError, "Outcome report response is not valid JSON"
+      end
     end
 
     CALLER_CLASSES = %w[human_session in_app_ai external_agent].freeze
