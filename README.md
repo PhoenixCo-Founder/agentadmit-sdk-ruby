@@ -398,6 +398,29 @@ result.user_intent # => "Book my flights to the Austin offsite in October" or ni
 
 `user_intent` is nullable -- connections issued without one (or by servers that predate the field) read as `nil`. Months later, a review screen can answer "is this still appropriate?" with the user's own stated boundary, not just the app's. Like purpose, it is a review-time record and never an enforcement input; authorization decisions ride scopes, connection status, and consent.
 
+## Agent Designation
+
+On AgentAdmit's consent page the user says which agent app a connection is for and, optionally, which AI model family it mainly uses. That is the user's statement, recorded with the grant; it is not a verified identity of the agent. Separately, an agent may report its own platform and model when it redeems the connection token; that is unverified too.
+
+The verify response reports both on every introspection, and the SDK surfaces them on the result as `designated_agent` and `agent_reported` (`nil` when the connection carries none):
+
+```ruby
+result = AgentAdmit::IntrospectionClient.new.verify(token)
+
+# {"agent_id" => ..., "name" => ..., "source" => "user_declared",
+#  "model" => {"model_id" => ..., "name" => ...} or nil}
+named = result.designated_agent
+# {"platform" => ..., "model" => {"id" => ..., "version" => ...} or nil}
+reported = result.agent_reported
+
+puts "Named by the user: #{named ? named['name'] : '(not named)'}"
+puts "Reported by the agent: #{reported&.dig('model', 'id') || '(nothing)'}"
+```
+
+Use `designated_agent["name"]` when you tell a user which of their connections did something: it is the name they chose. `agent_id` and `model["model_id"]` are the ids of your list entries, or `nil` when the user typed a name that is not on your list.
+
+Do not branch authorization on either field. They are records for people reviewing a connection, not a gate. Scope checks, connection status, and consent verdicts remain the only decision inputs. To act on a designation, use the hosted revoke API (`designated_agent_id`, `designated_model_id`) or your list's block setting in the dashboard.
+
 ## App-Attested Presence
 
 If your app gates token minting behind its own embedded passkey/WebAuthn ceremony, AgentAdmit never witnesses that ceremony (it is origin-bound), so by default the hosted service reports `presence.verified: false` for those connections. Attest the ceremony fact at issuance to close that gap -- AFTER verifying and consuming your own fresh, purpose-bound attestation:
