@@ -111,13 +111,22 @@ module AgentAdmit
     # @param connection_token [String] the ag_ct_… connection token
     # @param agent_label [String, nil] human-readable agent name
     # @param agent_id [String, nil] agent identifier
+    # @param agent_platform [String, nil] the agent app or runtime the agent
+    #   says it runs in (reported by the agent, unverified)
+    # @param agent_model [Hash, nil] the AI model the agent says it runs on:
+    #   {"id" => String, "version" => String (optional)} (reported by the
+    #   agent, unverified). The hosted service records both and never lets
+    #   them decide the outcome of the exchange.
     # @return [Hash] the exchange response — "access_token" is the ag_at_… token
     # @raise [IntrospectionError] if the exchange fails
     #
-    def exchange(connection_token, agent_label: nil, agent_id: nil)
+    def exchange(connection_token, agent_label: nil, agent_id: nil,
+                 agent_platform: nil, agent_model: nil)
       body = { "token" => connection_token }
       body["agent_label"] = agent_label if agent_label
       body["agent_id"] = agent_id if agent_id
+      body["agent_platform"] = agent_platform if agent_platform
+      body["agent_model"] = agent_model if agent_model
 
       post("/api/v1/exchange", body, authenticated: false, op: "exchange")
     end
