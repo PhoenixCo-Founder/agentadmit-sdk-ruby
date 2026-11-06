@@ -34,7 +34,8 @@ module AgentAdmit
                                      :sub, :role, :app_id, :jti, :exp, :consent,
                                      :presence, :purpose, :user_intent,
                                      :action_confirmation, :audit_row_id,
-                                     :consumed_receipt, keyword_init: true) do
+                                     :consumed_receipt, :designated_agent,
+                                     :agent_reported, keyword_init: true) do
       def has_scope?(scope)
         scopes.include?(scope)
       end
@@ -94,6 +95,24 @@ module AgentAdmit
       # `consumed_receipt` (Hash or nil) is a replay diagnostic for an
       # already-consumed confirm-each-time attestation. It is not a fresh
       # authorization and must not be treated as permission to run.
+
+      # `designated_agent` (Hash or nil) is what the USER said on AgentAdmit's
+      # consent page: which agent app the connection is for and, optionally,
+      # which AI model family it mainly uses:
+      # {"agent_id" => String|nil, "name" => String,
+      #  "source" => "user_declared",
+      #  "model" => {"model_id" => String|nil, "name" => String} | nil}.
+      # It is the user's statement, recorded with the grant; it is not a
+      # verified identity of the agent. `agent_id` / `model_id` are nil when
+      # the user typed a name that is not on the app's list.
+
+      # `agent_reported` (Hash or nil) is what the AGENT reported about itself
+      # when it redeemed the connection token:
+      # {"platform" => String|nil,
+      #  "model" => {"id" => String, "version" => String|nil} | nil}.
+      # Unverified. Both fields are review-time records only, never an
+      # enforcement input; authorization decisions ride scopes, connection
+      # status, and consent.
     end
 
     class << self
@@ -190,6 +209,58 @@ module AgentAdmit
           "connection_id" => raw["connection_id"],
           "chain_seq"     => raw["chain_seq"].is_a?(Integer) ? raw["chain_seq"] : nil,
           "row_hash"      => raw["row_hash"].is_a?(String) ? raw["row_hash"] : nil }
+      end
+
+      ##
+      # The user's agent designation from a verify response, or nil when the
+      # block is absent, null, or not a user-declared designation. Strict: a
+      # non-empty String name and source "user_declared", or the whole block
+      # is dropped. A malformed model is dropped and the app is kept. This is
+      # what the user said on the consent page, not a verified identity.
+      #
+      # @param raw [Object] the `designated_agent` value from the verify body
+      # @return [Hash, nil]
+      #
+      def parse_designated_agent(raw)
+        return nil unless raw.is_a?(Hash)
+        name = raw["name"]
+        return nil unless name.is_a?(String) && !name.empty?
+        return nil unless raw["source"] == "user_declared"
+
+        m = raw["model"]
+        model =
+          if m.is_a?(Hash) && m["name"].is_a?(String) && !m["name"].empty?
+            { "model_id" => m["model_id"].is_a?(String) ? m["model_id"] : nil,
+              "name"     => m["name"] }
+          end
+
+        { "agent_id" => raw["agent_id"].is_a?(String) ? raw["agent_id"] : nil,
+          "name"     => name,
+          "source"   => "user_declared",
+          "model"    => model }
+      end
+
+      ##
+      # What the agent reported about itself at token exchange, or nil when
+      # the block carries neither a platform nor a model id. Unverified.
+      #
+      # @param raw [Object] the `agent_reported` value from the verify body
+      # @return [Hash, nil]
+      #
+      def parse_agent_reported(raw)
+        return nil unless raw.is_a?(Hash)
+
+        platform = raw["platform"]
+        platform = nil unless platform.is_a?(String) && !platform.empty?
+        m = raw["model"]
+        model =
+          if m.is_a?(Hash) && m["id"].is_a?(String) && !m["id"].empty?
+            { "id"      => m["id"],
+              "version" => m["version"].is_a?(String) ? m["version"] : nil }
+          end
+        return nil if platform.nil? && model.nil?
+
+        { "platform" => platform, "model" => model }
       end
 
       ##
@@ -408,6 +479,13 @@ module AgentAdmit
         audit_row_id = nil unless audit_row_id.is_a?(String)
         consumed_receipt = self.class.parse_consumed_receipt(data["consumed_receipt"])
 
+        # Agent designation (1.14.0): what the user said the connection is
+        # for, and what the agent reported about itself. Review-time records,
+        # never an enforcement input, so a malformed block is dropped rather
+        # than failing the verify.
+        designated_agent = self.class.parse_designated_agent(data["designated_agent"])
+        agent_reported = self.class.parse_agent_reported(data["agent_reported"])
+
         return IntrospectionResult.new(
           user_id:      data["user_id"],
           connection_id: data["connection_id"],
@@ -424,7 +502,9 @@ module AgentAdmit
           user_intent:  user_intent,
           action_confirmation: action_confirmation,
           audit_row_id: audit_row_id,
-          consumed_receipt: consumed_receipt
+          consumed_receipt: consumed_receipt,
+          designated_agent: designated_agent,
+          agent_reported: agent_reported
         )
       end
 
