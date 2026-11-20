@@ -167,8 +167,7 @@ The SDK always forwards that header. A configured summary also causes the
 middleware to send a `sha256:` digest of the raw Rack body and the summary,
 then rewinds `rack.input` for the application. The hosted signature commits to
 the scope, method, endpoint, digest, and the words shown to the human.
-AgentAdmit proves what was shown but does not verify the summary against the
-request.
+AgentAdmit does not verify the summary against the request.
 
 Custom gates receive a typed `AgentAdmit::ConfirmationRequiredError` carrying
 the strictly parsed ceremony. Malformed ceremony blocks remain generic
