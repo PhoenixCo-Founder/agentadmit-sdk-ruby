@@ -167,8 +167,7 @@ The SDK always forwards that header. A configured summary also causes the
 middleware to send a `sha256:` digest of the raw Rack body and the summary,
 then rewinds `rack.input` for the application. The hosted signature commits to
 the scope, method, endpoint, digest, and the words shown to the human.
-AgentAdmit proves what was shown but does not verify the summary against the
-request.
+AgentAdmit does not verify the summary against the request.
 
 Custom gates receive a typed `AgentAdmit::ConfirmationRequiredError` carrying
 the strictly parsed ceremony. Malformed ceremony blocks remain generic
@@ -189,6 +188,83 @@ relay the decline to the user and not retry unless the user asks; only the
 user can lift a decline, and after the hold ends a retry stages a fresh
 confirmation. A malformed `declined` block degrades to a generic 403 with no
 block.
+
+### Confirm each time: when the user has no passkey yet
+
+A confirmation needs a passkey the user already has for your app. A user who
+granted before you marked the scope `confirm_each_time`, or whose passkeys you
+removed, has none, and the link the agent holds cannot be used alone. The
+hosted service says so on the refusal: `confirmation["enrollment_required"]`
+is `true`, and the SDK tells the agent to ask the user to open the request from
+inside your app. `false` means a passkey is on file. The key is left out when
+the hosted service did not state it; any value other than `true` or `false` is
+treated the same way.
+
+The 403 body the middleware sends in that case (custom gates get the same
+hash from `ConfirmationRequiredError#denial_body`):
+
+```json
+{
+  "error": "confirmation_required",
+  "error_description": "This action requires a fresh human confirmation, and this user has no passkey on file for the app yet, so the confirmation link alone cannot be used. Ask the user to open the request from inside the app. After they confirm, retry with the X-AgentAdmit-Action-Attestation header.",
+  "confirmation": {
+    "action_session_id": "asess_...",
+    "action_session_url": "https://agentadmit.com/confirm/action/asess_...",
+    "enrollment_required": true,
+    "expires_at": "2026-11-20T18:30:00.000Z",
+    "scope": "write:payments",
+    "method": "POST",
+    "endpoint": "/api/payments",
+    "request_digest": "sha256:...",
+    "summary": "Pay Alex $50"
+  }
+}
+```
+
+Your app then opens the confirmation for its own signed-in user with
+`TokensClient#create_owner_link(action_session_id:, app_user_id:)` and sends
+that user to
+`owner_session_url`. On that page the user creates a passkey and confirms the
+action; on a computer the page can show a QR code to continue on the user's
+phone. When a passkey is already on file the result has
+`"enrollment_required" => false` and the URL is the ordinary confirmation page.
+
+```ruby
+# A controller your signed-in user uses (your own session auth), not an agent route.
+class PendingConfirmationsController < ApplicationController
+  before_action :authenticate_user!
+
+  def open
+    link = AgentAdmit::TokensClient.new.create_owner_link(
+      action_session_id: params[:id],
+      app_user_id: current_user.id.to_s
+    )
+    redirect_to link["owner_session_url"], allow_other_host: true, status: :see_other
+  end
+end
+```
+
+Two rules:
+
+- Call `create_owner_link` only from a route your signed-in human uses, and pass
+  that user's id. The hosted service answers `404 not_found` when the
+  confirmation belongs to another user, another app, or the other environment.
+- Do not return `owner_session_url` to an agent, and do not log it. Whoever opens
+  it can create the passkey that confirms the action.
+
+The SDK does not add this to its middleware. A bad argument raises
+`ArgumentError` before any request. Hosted errors raise `AgentAdmit::ApiError`
+(an `IntrospectionError`) with `#status` and the hosted `#code`
+(`invalid_api_key`, `api_key_not_app_linked`, `not_found`, `already_consumed`,
+`already_verified`, `session_expired`); the call does not retry on a 4xx. Calling it again is safe: a new link replaces the previous
+one.
+
+Webhook: when your app removes a user's passkeys through the API, AgentAdmit
+sends a signed `agentadmit.passkey_removed` event to your webhook URL, and
+`AgentAdmit::Webhook.verify_signature` verifies it the same way as every other
+delivery. The event carries `removal_id` and, under `data`, `app_user_id`, `credential_ids`,
+`removed`, `remaining`, `wait_sec`, `removed_at`, `reenrollment_not_before` and
+`removed_by`.
 
 ## Rate Limiting
 

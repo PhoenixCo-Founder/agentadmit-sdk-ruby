@@ -3,6 +3,7 @@
 require "net/http"
 require "json"
 require "uri"
+require "erb"
 
 module AgentAdmit
   ##
@@ -147,14 +148,99 @@ module AgentAdmit
       post("/api/v1/revoke", body, authenticated: true, op: "revoke")
     end
 
+    # Shortest action_session_id the hosted service accepts (asess_ + id).
+    ACTION_SESSION_ID_MIN_LENGTH = 20
+    # Longest app_user_id the hosted service accepts.
+    APP_USER_ID_MAX_LENGTH = 255
+
+    ##
+    # Open a pending confirmation for your own signed-in user (SDK 1.15.0).
+    # Calls POST /api/v1/action-sessions/{action_session_id}/owner-link with
+    # the app's API key and { "app_user_id" => ... }.
+    #
+    # When a scope needs a fresh human confirmation and the user has no
+    # passkey on file for the app yet (confirmation["enrollment_required"]
+    # is true), the link the agent holds cannot be used alone. Send the
+    # signed-in user to the returned "owner_session_url": on that page they
+    # create a passkey and confirm the action; on a computer the page can
+    # show a QR code to continue on the user's phone.
+    #
+    # Two rules: call this only from a route your signed-in human uses,
+    # passing that user's id; never return "owner_session_url" to an agent
+    # (whoever opens it can create the passkey that confirms the action), and
+    # never log it. The SDK does not mount this on any middleware or route.
+    #
+    # @param action_session_id [String] confirmation["action_session_id"]
+    #   from the confirmation_required refusal
+    # @param app_user_id [String] the id of the user your backend has signed
+    #   in; it must be the user the confirmation is for
+    # @return [Hash] "action_session_id", "owner_session_url",
+    #   "enrollment_required" (true/false), "expires_at", and
+    #   "enrollment_reason" ("no_passkey" or "no_eligible_authenticator")
+    #   only when "enrollment_required" is true
+    # @raise [ArgumentError] on a bad argument, before any request
+    # @raise [ApiError] on any error status (no retry) or a malformed 2xx body
+    # @raise [IntrospectionError] when the hosted service cannot be reached
+    #
+    def create_owner_link(action_session_id:, app_user_id:)
+      unless action_session_id.is_a?(String) && action_session_id.start_with?("asess_") &&
+             action_session_id.length >= ACTION_SESSION_ID_MIN_LENGTH
+        raise ArgumentError, "action_session_id must be the action_session_id from the confirmation block (asess_...)"
+      end
+      unless app_user_id.is_a?(String) && !app_user_id.empty? && app_user_id.length <= APP_USER_ID_MAX_LENGTH
+        raise ArgumentError, "app_user_id must be a non-empty String of at most #{APP_USER_ID_MAX_LENGTH} characters"
+      end
+
+      path = "/api/v1/action-sessions/#{path_segment(action_session_id)}/owner-link"
+      response = send_post(path, { "app_user_id" => app_user_id }, authenticated: true, op: "create_owner_link")
+      status = response.code.to_i
+      parsed = begin
+        JSON.parse(response.body.to_s)
+      rescue JSON::ParserError
+        nil
+      end
+      body = parsed.is_a?(Hash) ? parsed : {}
+
+      unless status >= 200 && status < 300
+        code = body["error"].is_a?(String) ? body["error"] : nil
+        raise ApiError.new("create_owner_link returned #{status}#{code ? " #{code}" : ''}", status: status, code: code)
+      end
+
+      enrollment = body["enrollment_required"]
+      unless body["owner_session_url"].is_a?(String) && (enrollment == true || enrollment == false) &&
+             body["action_session_id"].is_a?(String) && body["expires_at"].is_a?(String)
+        # The body is not attached: it may hold a partial owner link.
+        raise ApiError.new("create_owner_link returned a malformed response", status: status)
+      end
+
+      link = { "action_session_id" => body["action_session_id"],
+               "owner_session_url" => body["owner_session_url"],
+               "enrollment_required" => enrollment,
+               "expires_at" => body["expires_at"] }
+      link["enrollment_reason"] = body["enrollment_reason"] if enrollment && body["enrollment_reason"].is_a?(String)
+      link
+    end
+
     private
 
-    def post(path, body, authenticated:, op:)
-      uri = URI.parse("#{@config.api_url.chomp('/')}#{path}")
+    # Percent-encodes one path segment (space as %20, never "+").
+    def path_segment(value)
+      ERB::Util.url_encode(value)
+    end
+
+    def build_http(uri)
       http = Net::HTTP.new(uri.host, uri.port)
       http.use_ssl = uri.scheme == "https"
       http.read_timeout = 10
       http.open_timeout = 10
+      http
+    end
+
+    # Sends one POST and returns the Net::HTTP response; a transport failure
+    # raises IntrospectionError, exactly like the other calls on this client.
+    def send_post(path, body, authenticated:, op:)
+      uri = URI.parse("#{@config.api_url.chomp('/')}#{path}")
+      http = build_http(uri)
 
       request = Net::HTTP::Post.new(uri.path)
       request["Content-Type"] = "application/json"
@@ -166,11 +252,14 @@ module AgentAdmit
       request.body = JSON.generate(body)
 
       begin
-        response = http.request(request)
+        http.request(request)
       rescue StandardError => e
         raise IntrospectionError, "#{op} failed: #{e.message}"
       end
+    end
 
+    def post(path, body, authenticated:, op:)
+      response = send_post(path, body, authenticated: authenticated, op: op)
       status = response.code.to_i
       raise IntrospectionError, "#{op} returned #{status}" if status >= 400
 
