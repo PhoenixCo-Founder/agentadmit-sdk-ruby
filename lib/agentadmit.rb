@@ -127,9 +127,19 @@ module AgentAdmit
                   "Give the confirmation link to the user, then retry with " \
                   "the X-AgentAdmit-Action-Attestation header."
 
+    # SDK 1.15.0: what the agent is told when the confirmation needs a
+    # passkey the user has not created yet (confirmation["enrollment_required"]
+    # is true). This one replaces the hosted description.
+    ENROLLMENT_REQUIRED_DESCRIPTION =
+      "This action requires a fresh human confirmation, and this user has no " \
+      "passkey on file for the app yet, so the confirmation link alone cannot " \
+      "be used. Ask the user to open the request from inside the app. After " \
+      "they confirm, retry with the X-AgentAdmit-Action-Attestation header."
+
     # @return [Hash] the strictly-typed staged ceremony: action_session_id,
     #   action_session_url, expires_at, scope (Strings), and method, endpoint,
-    #   request_digest, summary (String or nil).
+    #   request_digest, summary (String or nil); plus "enrollment_required"
+    #   (true or false, 1.15.0) only when the hosted service stated it.
     attr_reader :confirmation
     # @return [String, nil] why a presented attestation was not accepted.
     attr_reader :attestation_status
@@ -207,6 +217,23 @@ module AgentAdmit
   end
 
   class IntrospectionError < Error; end
+
+  ##
+  # A hosted API call answered with an error status or a malformed body
+  # (SDK 1.15.0, raised by {TokensClient#create_owner_link}). A subclass of
+  # {IntrospectionError}, so existing rescues keep working. {#status} is the
+  # HTTP status, {#code} the hosted `error` code (nil for a malformed success
+  # body). The message never carries an owner link.
+  #
+  class ApiError < IntrospectionError
+    attr_reader :status, :code
+
+    def initialize(message, status:, code: nil)
+      super(message)
+      @status = status
+      @code = code
+    end
+  end
   class ConfigurationError < Error; end
 
   ##

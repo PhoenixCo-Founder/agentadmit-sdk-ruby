@@ -147,7 +147,9 @@ module AgentAdmit
       # A strictly-typed copy of the wire `confirmation` block, or nil when
       # it is malformed. ids/urls/expiry/scope must be Strings; method,
       # endpoint, request_digest and summary are nullable Strings (anything
-      # else reads as nil). Nothing outside the contract is copied through.
+      # else reads as nil). "enrollment_required" (1.15.0) is present only
+      # when the wire value is true or false. Nothing outside the contract
+      # is copied through.
       #
       # @param raw [Object] the `confirmation` value from the hosted response
       # @return [Hash, nil]
@@ -158,14 +160,21 @@ module AgentAdmit
                           .all? { |key| raw[key].is_a?(String) }
 
         nullable = ->(value) { value.is_a?(String) ? value : nil }
-        { "action_session_id"  => raw["action_session_id"],
+        confirmation = {
+          "action_session_id"  => raw["action_session_id"],
           "action_session_url" => raw["action_session_url"],
           "expires_at"         => raw["expires_at"],
           "scope"              => raw["scope"],
           "method"             => nullable.call(raw["method"]),
           "endpoint"           => nullable.call(raw["endpoint"]),
           "request_digest"     => nullable.call(raw["request_digest"]),
-          "summary"            => nullable.call(raw["summary"]) }
+          "summary"            => nullable.call(raw["summary"])
+        }
+        # SDK 1.15.0: kept only when the wire value is true or false; any
+        # other value reads as if the key were missing (never coerced).
+        enrollment = raw["enrollment_required"]
+        confirmation["enrollment_required"] = enrollment if enrollment == true || enrollment == false
+        confirmation
       end
 
       ##
@@ -697,6 +706,10 @@ module AgentAdmit
           description = data["error_description"]
           description = ConfirmationRequiredError::DESCRIPTION unless
             description.is_a?(String) && !description.empty?
+          # SDK 1.15.0: the user has no passkey yet, so the link alone cannot
+          # be used; the agent is told to send the user into the app.
+          description = ConfirmationRequiredError::ENROLLMENT_REQUIRED_DESCRIPTION if
+            confirmation["enrollment_required"] == true
           status = data["attestation_status"]
           raise ConfirmationRequiredError.new(
             description,
